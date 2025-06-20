@@ -1,18 +1,20 @@
 /**
  * Database utilities for common operations
- * Optimized for PostgreSQL and transaction management
+ * Optimized for Neon Database and serverless environments
  */
 const { pool } = require("../config/database")
 const logger = require("../middleware/logger")
 
 /**
- * Begin a database transaction and attach it to the request object
- * Improved error handling and connection management
+ * Begin a database transaction with enhanced error handling for Neon
  */
 const beginTransaction = async (req, res, next) => {
-  const client = await pool.connect()
+  let client
   try {
+    // Add retry logic for Neon connection issues
+    client = await retryConnection(3)
     await client.query("BEGIN")
+
     req.dbTransaction = {
       client,
       commit: async () => {
@@ -49,53 +51,103 @@ const beginTransaction = async (req, res, next) => {
     }
     next()
   } catch (err) {
-    client.release()
+    if (client) {
+      client.release()
+    }
     logger.error(`Transaction initialization error: ${err.message}`)
-    res.status(500).json({ error: "Database error", message: "Failed to initialize transaction" })
+
+    // Handle Neon-specific errors
+    if (err.message.includes("database is sleeping")) {
+      res.status(503).json({
+        error: "Database temporarily unavailable",
+        message: "Database is waking up, please try again in a moment",
+      })
+    } else {
+      res.status(500).json({ error: "Database error", message: "Failed to initialize transaction" })
+    }
   }
 }
 
 /**
- * Execute a query with proper error handling and logging
- * Optimized for PostgreSQL syntax
+ * Retry connection logic for Neon database wake-up scenarios
  */
-const executeQuery = async (text, params = []) => {
-  const start = Date.now()
-  try {
-    const result = await pool.query(text, params)
-    const duration = Date.now() - start
+const retryConnection = async (maxRetries = 3, delay = 1000) => {
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      const client = await pool.connect()
+      return client
+    } catch (err) {
+      logger.warn(`Connection attempt ${i + 1} failed: ${err.message}`)
 
-    // Log slow queries for performance monitoring
-    if (duration > 200) {
-      logger.warn(`Slow query (${duration}ms): ${text}`)
+      if (i === maxRetries - 1) {
+        throw err
+      }
+
+      // Wait before retrying (exponential backoff)
+      await new Promise((resolve) => setTimeout(resolve, delay * Math.pow(2, i)))
     }
-
-    return result
-  } catch (err) {
-    logger.error(`Query error: ${err.message}`)
-    logger.error(`Query: ${text}`)
-    logger.error(`Params: ${JSON.stringify(params)}`)
-
-    // Enhanced error handling for common PostgreSQL errors
-    if (err.code === "23505") {
-      throw new Error(`Duplicate key violation: ${err.detail || err.message}`)
-    } else if (err.code === "23503") {
-      throw new Error(`Foreign key constraint violation: ${err.detail || err.message}`)
-    } else if (err.code === "42P01") {
-      throw new Error(`Table does not exist: ${err.message}`)
-    } else if (err.code === "42703") {
-      throw new Error(`Column does not exist: ${err.message}`)
-    }
-
-    throw err
   }
 }
 
 /**
- * Creates a table if it doesn't exist
- * @param {string} tableName - Name of the table to check/create
- * @param {string} createTableSQL - SQL to create the table
- * @returns {Promise<boolean>} True if table was created, false if it already existed
+ * Execute a query with enhanced error handling and retry logic for Neon
+ */
+const executeQuery = async (text, params = [], retries = 2) => {
+  const start = Date.now()
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const result = await pool.query(text, params)
+      const duration = Date.now() - start
+
+      // Log slow queries for performance monitoring
+      if (duration > 500) {
+        logger.warn(`Slow query (${duration}ms): ${text.substring(0, 100)}...`)
+      }
+
+      return result
+    } catch (err) {
+      logger.error(`Query error (attempt ${attempt + 1}): ${err.message}`)
+
+      // Don't retry on the last attempt or for certain error types
+      if (attempt === retries || !shouldRetryError(err)) {
+        logger.error(`Query: ${text}`)
+        logger.error(`Params: ${JSON.stringify(params)}`)
+
+        // Enhanced error handling for common PostgreSQL/Neon errors
+        if (err.code === "23505") {
+          throw new Error(`Duplicate key violation: ${err.detail || err.message}`)
+        } else if (err.code === "23503") {
+          throw new Error(`Foreign key constraint violation: ${err.detail || err.message}`)
+        } else if (err.code === "42P01") {
+          throw new Error(`Table does not exist: ${err.message}`)
+        } else if (err.code === "42703") {
+          throw new Error(`Column does not exist: ${err.message}`)
+        } else if (err.message.includes("database is sleeping")) {
+          throw new Error("Database is temporarily unavailable (waking up)")
+        }
+
+        throw err
+      }
+
+      // Wait before retrying
+      await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)))
+    }
+  }
+}
+
+/**
+ * Determine if an error should trigger a retry
+ */
+const shouldRetryError = (err) => {
+  const retryableCodes = ["ECONNRESET", "ENOTFOUND", "ETIMEDOUT", "ECONNREFUSED"]
+  const retryableMessages = ["database is sleeping", "connection terminated", "server closed the connection"]
+
+  return retryableCodes.includes(err.code) || retryableMessages.some((msg) => err.message.toLowerCase().includes(msg))
+}
+
+/**
+ * Creates a table if it doesn't exist (optimized for Neon)
  */
 const createTableIfNotExists = async (tableName, createTableSQL) => {
   try {
@@ -106,20 +158,25 @@ const createTableIfNotExists = async (tableName, createTableSQL) => {
     )
 
     if (!tableCheck.rows[0].exists) {
-      // Fix: Use a transaction for table creation
-      const client = await pool.connect()
+      // Use a transaction for table creation with retry logic
+      let client
       try {
+        client = await retryConnection(3)
         await client.query("BEGIN")
         await client.query(createTableSQL)
         await client.query("COMMIT")
         logger.info(`Created table: ${tableName}`)
         return true
       } catch (err) {
-        await client.query("ROLLBACK")
+        if (client) {
+          await client.query("ROLLBACK")
+        }
         logger.error(`Error creating table ${tableName}: ${err.message}`)
         throw err
       } finally {
-        client.release()
+        if (client) {
+          client.release()
+        }
       }
     }
 
@@ -131,7 +188,7 @@ const createTableIfNotExists = async (tableName, createTableSQL) => {
 }
 
 /**
- * Check if a record exists with improved error handling
+ * Check if a record exists with enhanced error handling
  */
 const recordExists = async (table, field, value) => {
   try {
@@ -145,7 +202,6 @@ const recordExists = async (table, field, value) => {
 
 /**
  * Get a record by ID with proper error handling
- * Supports selecting specific fields
  */
 const getById = async (table, id, fields = "*") => {
   try {
@@ -159,7 +215,6 @@ const getById = async (table, id, fields = "*") => {
 
 /**
  * Insert a record and return the created object
- * Optimized for PostgreSQL RETURNING clause
  */
 const insertRecord = async (table, data) => {
   const keys = Object.keys(data)
@@ -181,13 +236,10 @@ const insertRecord = async (table, data) => {
 
 /**
  * Update a record by ID and return the updated object
- * Optimized for PostgreSQL RETURNING clause
  */
 const updateById = async (table, id, data) => {
   const keys = Object.keys(data)
   const values = Object.values(data)
-
-  // Build SET clause with proper parameter indexing
   const setClause = keys.map((k, i) => `"${k}" = $${i + 1}`).join(", ")
 
   try {
@@ -210,4 +262,5 @@ module.exports = {
   insertRecord,
   updateById,
   createTableIfNotExists,
+  retryConnection,
 }
