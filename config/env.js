@@ -13,8 +13,9 @@ if (missingEnvVars.length > 0) {
   console.log("JWT_SECRET=your_jwt_secret_here")
   console.log("JWT_REFRESH_SECRET=your_jwt_refresh_secret_here")
   console.log("")
-  console.log("For Neon Database (Production):")
-  console.log("DATABASE_URL=postgresql://username:password@ep-xxx-xxx.region.aws.neon.tech/dbname?sslmode=require")
+  console.log("For Supabase Database (Production):")
+  console.log("DATABASE_URL=postgresql://postgres:[YOUR-PASSWORD]@db.[YOUR-PROJECT-REF].supabase.co:5432/postgres")
+  console.log("# Get this from: https://app.supabase.com/project/YOUR_PROJECT/settings/database")
   console.log("")
   console.log("For Local Development:")
   console.log("DB_USER=your_db_user")
@@ -39,11 +40,11 @@ process.env.FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000"
 process.env.PORT = process.env.PORT || "5000"
 process.env.NODE_ENV = process.env.NODE_ENV || "development"
 
-// Database configuration - support both Neon URL and individual parameters
-const databaseUrl = process.env.DATABASE_URL || process.env.NEON_DATABASE_URL
+// Database configuration - support both Supabase URL and individual parameters
+const databaseUrl = process.env.DATABASE_URL || process.env.SUPABASE_DATABASE_URL
 
 if (databaseUrl) {
-  console.log("📡 Using Neon database URL for connection")
+  console.log("📡 Using Supabase database URL for connection")
 } else {
   console.log("🏠 Using individual database parameters for connection")
   // Set defaults for local development
@@ -60,7 +61,7 @@ module.exports = {
   JWT_SECRET: process.env.JWT_SECRET,
   JWT_REFRESH_SECRET: process.env.JWT_REFRESH_SECRET,
   DATABASE_URL: process.env.DATABASE_URL,
-  NEON_DATABASE_URL: process.env.NEON_DATABASE_URL,
+  SUPABASE_DATABASE_URL: process.env.SUPABASE_DATABASE_URL,
   DB_USER: process.env.DB_USER,
   DB_HOST: process.env.DB_HOST,
   DB_NAME: process.env.DB_NAME,
