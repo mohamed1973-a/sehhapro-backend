@@ -1,20 +1,20 @@
 /**
  * Database configuration for PostgreSQL
- * Optimized for Neon Database and connection pooling
+ * Optimized for Supabase and connection pooling
  */
 const { Pool } = require("pg")
 require("dotenv").config()
 
-// Parse Neon database URL if provided, otherwise use individual parameters
+// Parse Supabase database URL if provided, otherwise use individual parameters
 function getDatabaseConfig() {
-  const databaseUrl = process.env.DATABASE_URL || process.env.NEON_DATABASE_URL
+  const databaseUrl = process.env.DATABASE_URL || process.env.SUPABASE_DATABASE_URL
 
   if (databaseUrl) {
-    // Use the full database URL (Neon format)
+    // Use the full database URL (Supabase format)
     return {
       connectionString: databaseUrl,
       ssl: {
-        rejectUnauthorized: false, // Required for Neon
+        rejectUnauthorized: false, // Required for Supabase
       },
     }
   }
@@ -30,43 +30,45 @@ function getDatabaseConfig() {
   }
 }
 
-// Create connection pool with optimized settings for Neon
+// Create connection pool with optimized settings for Supabase
 const pool = new Pool({
   ...getDatabaseConfig(),
-  // Connection pool settings optimized for serverless/Neon
-  max: process.env.NODE_ENV === "production" ? 10 : 5, // Reduced for serverless
-  idleTimeoutMillis: 10000, // Shorter idle timeout for serverless
-  connectionTimeoutMillis: 10000, // Increased timeout for Neon
-  acquireTimeoutMillis: 10000, // Time to wait for connection from pool
-  createTimeoutMillis: 10000, // Time to wait for new connection creation
+  // Connection pool settings optimized for Supabase
+  max: process.env.NODE_ENV === "production" ? 15 : 5, // Supabase handles more connections
+  idleTimeoutMillis: 30000, // Standard timeout for Supabase
+  connectionTimeoutMillis: 8000, // Supabase connection timeout
+  acquireTimeoutMillis: 8000, // Time to wait for connection from pool
+  createTimeoutMillis: 8000, // Time to wait for new connection creation
   destroyTimeoutMillis: 5000, // Time to wait for connection destruction
   reapIntervalMillis: 1000, // How often to check for idle connections
   createRetryIntervalMillis: 200, // Retry interval for failed connections
 })
 
-// Enhanced error handling for Neon-specific issues
+// Enhanced error handling for Supabase-specific issues
 pool.on("error", (err) => {
   console.error("Unexpected database pool error:", err)
 
-  // Log specific Neon connection issues
+  // Log specific Supabase connection issues
   if (err.code === "ENOTFOUND") {
-    console.error("❌ Neon database host not found. Check your DATABASE_URL")
+    console.error("❌ Supabase database host not found. Check your DATABASE_URL")
   } else if (err.code === "ECONNREFUSED") {
-    console.error("❌ Connection refused. Neon database may be sleeping or unavailable")
+    console.error("❌ Connection refused. Check your Supabase database configuration")
   } else if (err.message.includes("password authentication failed")) {
-    console.error("❌ Authentication failed. Check your Neon database credentials")
+    console.error("❌ Authentication failed. Check your Supabase database credentials")
+  } else if (err.message.includes("too many connections")) {
+    console.error("❌ Too many connections to Supabase. Consider connection pooling")
   }
 })
 
-// Enhanced connection testing with Neon-specific diagnostics
+// Enhanced connection testing with Supabase-specific diagnostics
 async function testConnection() {
   let client
   try {
-    console.log("🔄 Testing database connection...")
+    console.log("🔄 Testing Supabase database connection...")
 
     // Log connection method being used
-    if (process.env.DATABASE_URL || process.env.NEON_DATABASE_URL) {
-      console.log("📡 Using Neon database URL connection")
+    if (process.env.DATABASE_URL || process.env.SUPABASE_DATABASE_URL) {
+      console.log("📡 Using Supabase database URL connection")
     } else {
       console.log("🏠 Using local database connection parameters")
     }
@@ -75,9 +77,22 @@ async function testConnection() {
 
     // Test basic query
     const result = await client.query("SELECT NOW() as current_time, version() as pg_version")
-    console.log("✅ Database connection successful")
+    console.log("✅ Supabase database connection successful")
     console.log(`📅 Server time: ${result.rows[0].current_time}`)
     console.log(`🐘 PostgreSQL version: ${result.rows[0].pg_version.split(" ")[0]}`)
+
+    // Check Supabase-specific extensions
+    const extensionsResult = await client.query(`
+      SELECT extname 
+      FROM pg_extension 
+      WHERE extname IN ('uuid-ossp', 'pgcrypto', 'pgjwt')
+      ORDER BY extname
+    `)
+
+    const extensions = extensionsResult.rows.map((row) => row.extname)
+    if (extensions.length > 0) {
+      console.log(`🔌 Supabase extensions available: ${extensions.join(", ")}`)
+    }
 
     // Check for essential tables
     const tablesResult = await client.query(`
@@ -110,25 +125,31 @@ async function testConnection() {
 
     return true
   } catch (err) {
-    console.error("❌ Database connection failed:", err.message)
+    console.error("❌ Supabase database connection failed:", err.message)
 
-    // Enhanced error diagnostics for Neon
+    // Enhanced error diagnostics for Supabase
     if (err.code === "ENOTFOUND") {
-      console.error("🔍 DNS lookup failed. Check your Neon database URL")
+      console.error("🔍 DNS lookup failed. Check your Supabase database URL")
       console.error("💡 Make sure your DATABASE_URL environment variable is set correctly")
+      console.error(
+        "💡 Get your connection string from: https://app.supabase.com/project/YOUR_PROJECT/settings/database",
+      )
     } else if (err.code === "ECONNREFUSED") {
       console.error("🔍 Connection refused. This could mean:")
-      console.error("   • Neon database is sleeping (try again in a few seconds)")
-      console.error("   • Database URL is incorrect")
+      console.error("   • Supabase database URL is incorrect")
       console.error("   • Network connectivity issues")
+      console.error("   • Supabase project is paused")
     } else if (err.code === "28P01") {
       console.error("🔍 Authentication failed. Check your database credentials in the URL")
+      console.error("💡 Make sure you're using the correct password from Supabase dashboard")
     } else if (err.code === "3D000") {
-      console.error(`🔍 Database does not exist. Check your Neon database name`)
+      console.error(`🔍 Database does not exist. Check your Supabase database name`)
     } else if (err.message.includes("SSL")) {
-      console.error("🔍 SSL connection issue. Neon requires SSL connections")
+      console.error("🔍 SSL connection issue. Supabase requires SSL connections")
     } else if (err.code === "ETIMEDOUT") {
-      console.error("🔍 Connection timeout. Neon database may be slow to respond")
+      console.error("🔍 Connection timeout. Check your network connection to Supabase")
+    } else if (err.message.includes("too many connections")) {
+      console.error("🔍 Connection limit reached. Supabase has connection limits based on your plan")
     }
 
     return false
@@ -139,13 +160,13 @@ async function testConnection() {
   }
 }
 
-// Graceful shutdown function for serverless environments
+// Graceful shutdown function for Supabase environments
 async function closePool() {
   try {
     await pool.end()
-    console.log("🔌 Database pool closed successfully")
+    console.log("🔌 Supabase database pool closed successfully")
   } catch (err) {
-    console.error("❌ Error closing database pool:", err.message)
+    console.error("❌ Error closing Supabase database pool:", err.message)
   }
 }
 
