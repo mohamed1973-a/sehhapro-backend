@@ -22,8 +22,8 @@ async function startServer() {
   try {
     logger.info("🚀 Starting Healthcare Management System Backend...")
 
-    // Test database connection with retry logic for Neon
-    logger.info("🔄 Testing database connection...")
+    // Test database connection with retry logic for Supabase
+    logger.info("🔄 Testing Supabase database connection...")
     let dbConnected = false
     let retries = 3
 
@@ -33,19 +33,20 @@ async function startServer() {
       if (!dbConnected) {
         retries--
         if (retries > 0) {
-          logger.warn(`Database connection failed, retrying... (${retries} attempts left)`)
+          logger.warn(`Supabase connection failed, retrying... (${retries} attempts left)`)
           await new Promise((resolve) => setTimeout(resolve, 2000))
         }
       }
     }
 
     if (!dbConnected) {
-      logger.error("❌ Failed to connect to database after multiple attempts.")
-      logger.error("🔍 Please check your database configuration:")
+      logger.error("❌ Failed to connect to Supabase database after multiple attempts.")
+      logger.error("🔍 Please check your Supabase configuration:")
 
-      if (process.env.DATABASE_URL || process.env.NEON_DATABASE_URL) {
-        logger.error("   • Verify your Neon DATABASE_URL is correct")
-        logger.error("   • Ensure your Neon database is not sleeping")
+      if (process.env.DATABASE_URL || process.env.SUPABASE_DATABASE_URL) {
+        logger.error("   • Verify your Supabase DATABASE_URL is correct")
+        logger.error("   • Get connection string from: https://app.supabase.com/project/YOUR_PROJECT/settings/database")
+        logger.error("   • Ensure your Supabase project is not paused")
         logger.error("   • Check your network connectivity")
       } else {
         logger.error("   • Verify your local PostgreSQL is running")
@@ -70,8 +71,8 @@ async function startServer() {
       logger.info(`🔗 API Base URL: http://localhost:${PORT}/api`)
       logger.info(`🔗 Health Check: http://localhost:${PORT}/health`)
 
-      if (process.env.DATABASE_URL || process.env.NEON_DATABASE_URL) {
-        logger.info(`📡 Connected to Neon Database`)
+      if (process.env.DATABASE_URL || process.env.SUPABASE_DATABASE_URL) {
+        logger.info(`📡 Connected to Supabase Database`)
       } else {
         logger.info(`🏠 Connected to Local PostgreSQL Database`)
       }
