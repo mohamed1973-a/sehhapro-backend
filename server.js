@@ -1,5 +1,5 @@
 const app = require("./app")
-const { testConnection } = require("./config/database")
+const { testConnection, closePool } = require("./config/database")
 const logger = require("./middleware/logger")
 
 // Function to find an available port
@@ -20,10 +20,38 @@ async function findAvailablePort(startPort) {
 
 async function startServer() {
   try {
-    // Test database connection first
-    const dbConnected = await testConnection()
+    logger.info("🚀 Starting Healthcare Management System Backend...")
+
+    // Test database connection with retry logic for Neon
+    logger.info("🔄 Testing database connection...")
+    let dbConnected = false
+    let retries = 3
+
+    while (!dbConnected && retries > 0) {
+      dbConnected = await testConnection()
+
+      if (!dbConnected) {
+        retries--
+        if (retries > 0) {
+          logger.warn(`Database connection failed, retrying... (${retries} attempts left)`)
+          await new Promise((resolve) => setTimeout(resolve, 2000))
+        }
+      }
+    }
+
     if (!dbConnected) {
-      logger.error("Failed to connect to database. Server will not start.")
+      logger.error("❌ Failed to connect to database after multiple attempts.")
+      logger.error("🔍 Please check your database configuration:")
+
+      if (process.env.DATABASE_URL || process.env.NEON_DATABASE_URL) {
+        logger.error("   • Verify your Neon DATABASE_URL is correct")
+        logger.error("   • Ensure your Neon database is not sleeping")
+        logger.error("   • Check your network connectivity")
+      } else {
+        logger.error("   • Verify your local PostgreSQL is running")
+        logger.error("   • Check your DB_* environment variables")
+      }
+
       process.exit(1)
     }
 
@@ -37,53 +65,71 @@ async function startServer() {
 
     // Start the server
     const server = app.listen(PORT, () => {
-      logger.info(`🚀 Server running on port ${PORT}`)
+      logger.info(`✅ Server running on port ${PORT}`)
       logger.info(`📊 Environment: ${process.env.NODE_ENV || "development"}`)
       logger.info(`🔗 API Base URL: http://localhost:${PORT}/api`)
       logger.info(`🔗 Health Check: http://localhost:${PORT}/health`)
+
+      if (process.env.DATABASE_URL || process.env.NEON_DATABASE_URL) {
+        logger.info(`📡 Connected to Neon Database`)
+      } else {
+        logger.info(`🏠 Connected to Local PostgreSQL Database`)
+      }
     })
 
     // Handle server errors
     server.on("error", (error) => {
       if (error.code === "EADDRINUSE") {
-        logger.error(`Port ${PORT} is already in use`)
+        logger.error(`❌ Port ${PORT} is already in use`)
         process.exit(1)
       } else {
-        logger.error("Server error:", error)
+        logger.error("❌ Server error:", error)
         process.exit(1)
       }
     })
 
-    // Graceful shutdown
-    process.on("SIGTERM", () => {
-      logger.info("SIGTERM received, shutting down gracefully")
-      server.close(() => {
-        logger.info("Process terminated")
-        process.exit(0)
-      })
-    })
+    // Graceful shutdown with database cleanup
+    const gracefulShutdown = async (signal) => {
+      logger.info(`${signal} received, shutting down gracefully...`)
 
-    process.on("SIGINT", () => {
-      logger.info("SIGINT received, shutting down gracefully")
-      server.close(() => {
-        logger.info("Process terminated")
-        process.exit(0)
+      // Close server first
+      server.close(async () => {
+        logger.info("🔌 HTTP server closed")
+
+        // Close database pool
+        try {
+          await closePool()
+          logger.info("✅ Graceful shutdown completed")
+          process.exit(0)
+        } catch (err) {
+          logger.error("❌ Error during shutdown:", err.message)
+          process.exit(1)
+        }
       })
-    })
+
+      // Force close after timeout
+      setTimeout(() => {
+        logger.error("❌ Forced shutdown due to timeout")
+        process.exit(1)
+      }, 10000)
+    }
+
+    process.on("SIGTERM", () => gracefulShutdown("SIGTERM"))
+    process.on("SIGINT", () => gracefulShutdown("SIGINT"))
   } catch (error) {
-    logger.error("Failed to start server:", error)
+    logger.error("❌ Failed to start server:", error)
     process.exit(1)
   }
 }
 
 // Handle uncaught exceptions
 process.on("uncaughtException", (error) => {
-  logger.error("Uncaught Exception:", error)
+  logger.error("❌ Uncaught Exception:", error)
   process.exit(1)
 })
 
 process.on("unhandledRejection", (reason, promise) => {
-  logger.error("Unhandled Rejection at:", promise, "reason:", reason)
+  logger.error("❌ Unhandled Rejection at:", promise, "reason:", reason)
   process.exit(1)
 })
 
