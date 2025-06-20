@@ -1,17 +1,17 @@
 /**
  * Database utilities for common operations
- * Optimized for Neon Database and serverless environments
+ * Optimized for Supabase and PostgreSQL
  */
 const { pool } = require("../config/database")
 const logger = require("../middleware/logger")
 
 /**
- * Begin a database transaction with enhanced error handling for Neon
+ * Begin a database transaction with enhanced error handling for Supabase
  */
 const beginTransaction = async (req, res, next) => {
   let client
   try {
-    // Add retry logic for Neon connection issues
+    // Add retry logic for Supabase connection issues
     client = await retryConnection(3)
     await client.query("BEGIN")
 
@@ -56,11 +56,16 @@ const beginTransaction = async (req, res, next) => {
     }
     logger.error(`Transaction initialization error: ${err.message}`)
 
-    // Handle Neon-specific errors
-    if (err.message.includes("database is sleeping")) {
+    // Handle Supabase-specific errors
+    if (err.message.includes("too many connections")) {
+      res.status(503).json({
+        error: "Database connection limit reached",
+        message: "Too many active connections. Please try again in a moment",
+      })
+    } else if (err.code === "ECONNREFUSED") {
       res.status(503).json({
         error: "Database temporarily unavailable",
-        message: "Database is waking up, please try again in a moment",
+        message: "Unable to connect to Supabase database",
       })
     } else {
       res.status(500).json({ error: "Database error", message: "Failed to initialize transaction" })
@@ -69,7 +74,7 @@ const beginTransaction = async (req, res, next) => {
 }
 
 /**
- * Retry connection logic for Neon database wake-up scenarios
+ * Retry connection logic for Supabase connection scenarios
  */
 const retryConnection = async (maxRetries = 3, delay = 1000) => {
   for (let i = 0; i < maxRetries; i++) {
@@ -77,7 +82,7 @@ const retryConnection = async (maxRetries = 3, delay = 1000) => {
       const client = await pool.connect()
       return client
     } catch (err) {
-      logger.warn(`Connection attempt ${i + 1} failed: ${err.message}`)
+      logger.warn(`Supabase connection attempt ${i + 1} failed: ${err.message}`)
 
       if (i === maxRetries - 1) {
         throw err
@@ -90,7 +95,7 @@ const retryConnection = async (maxRetries = 3, delay = 1000) => {
 }
 
 /**
- * Execute a query with enhanced error handling and retry logic for Neon
+ * Execute a query with enhanced error handling and retry logic for Supabase
  */
 const executeQuery = async (text, params = [], retries = 2) => {
   const start = Date.now()
@@ -101,7 +106,7 @@ const executeQuery = async (text, params = [], retries = 2) => {
       const duration = Date.now() - start
 
       // Log slow queries for performance monitoring
-      if (duration > 500) {
+      if (duration > 1000) {
         logger.warn(`Slow query (${duration}ms): ${text.substring(0, 100)}...`)
       }
 
@@ -114,7 +119,7 @@ const executeQuery = async (text, params = [], retries = 2) => {
         logger.error(`Query: ${text}`)
         logger.error(`Params: ${JSON.stringify(params)}`)
 
-        // Enhanced error handling for common PostgreSQL/Neon errors
+        // Enhanced error handling for common PostgreSQL/Supabase errors
         if (err.code === "23505") {
           throw new Error(`Duplicate key violation: ${err.detail || err.message}`)
         } else if (err.code === "23503") {
@@ -123,8 +128,10 @@ const executeQuery = async (text, params = [], retries = 2) => {
           throw new Error(`Table does not exist: ${err.message}`)
         } else if (err.code === "42703") {
           throw new Error(`Column does not exist: ${err.message}`)
-        } else if (err.message.includes("database is sleeping")) {
-          throw new Error("Database is temporarily unavailable (waking up)")
+        } else if (err.message.includes("too many connections")) {
+          throw new Error("Database connection limit reached")
+        } else if (err.code === "53300") {
+          throw new Error("Supabase connection limit exceeded")
         }
 
         throw err
@@ -140,14 +147,14 @@ const executeQuery = async (text, params = [], retries = 2) => {
  * Determine if an error should trigger a retry
  */
 const shouldRetryError = (err) => {
-  const retryableCodes = ["ECONNRESET", "ENOTFOUND", "ETIMEDOUT", "ECONNREFUSED"]
-  const retryableMessages = ["database is sleeping", "connection terminated", "server closed the connection"]
+  const retryableCodes = ["ECONNRESET", "ENOTFOUND", "ETIMEDOUT", "ECONNREFUSED", "53300"]
+  const retryableMessages = ["connection terminated", "server closed the connection", "too many connections"]
 
   return retryableCodes.includes(err.code) || retryableMessages.some((msg) => err.message.toLowerCase().includes(msg))
 }
 
 /**
- * Creates a table if it doesn't exist (optimized for Neon)
+ * Creates a table if it doesn't exist (optimized for Supabase)
  */
 const createTableIfNotExists = async (tableName, createTableSQL) => {
   try {
