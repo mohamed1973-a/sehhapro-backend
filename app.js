@@ -41,20 +41,48 @@ app.use(
   }),
 )
 
-// CORS configuration
+// CORS configuration - UPDATED to include your Vercel deployment
+const allowedOrigins = [
+  "http://localhost:3000",
+  "https://localhost:3000",
+  "https://sehhapro-1.vercel.app", // Your Vercel deployment
+  "https://sehhapro.vercel.app", // In case you have a custom domain
+  process.env.FRONTEND_URL,
+  process.env.NEXT_PUBLIC_APP_URL,
+].filter(Boolean)
+
 app.use(
   cors({
-    origin: [
-      "http://localhost:3000",
-      "https://localhost:3000",
-      process.env.FRONTEND_URL,
-      process.env.NEXT_PUBLIC_APP_URL,
-    ].filter(Boolean),
+    origin: (origin, callback) => {
+      // Allow requests with no origin (like mobile apps or curl requests)
+      if (!origin) return callback(null, true)
+
+      if (allowedOrigins.indexOf(origin) !== -1) {
+        callback(null, true)
+      } else {
+        console.log(`CORS blocked origin: ${origin}`)
+        callback(new Error("Not allowed by CORS"))
+      }
+    },
     credentials: true,
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-Requested-With",
+      "Accept",
+      "Origin",
+      "Access-Control-Request-Method",
+      "Access-Control-Request-Headers",
+    ],
+    exposedHeaders: ["Authorization"],
+    preflightContinue: false,
+    optionsSuccessStatus: 204,
   }),
 )
+
+// Handle preflight requests explicitly
+app.options("*", cors())
 
 // Body parsing middleware
 app.use(express.json({ limit: "10mb" }))
