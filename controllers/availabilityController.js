@@ -8,7 +8,7 @@ const { pool } = require("../config/database")
 const logger = require("../middleware/logger")
 const { body, validationResult } = require("express-validator")
 
-// Replace the existing parseLocalDateString function with this improved version:
+// Improved date parsing function
 function parseLocalDateString(dateTimeString) {
   // If the string already has timezone info, use it as is
   if (dateTimeString.endsWith("Z") || /[+-]\d{2}:\d{2}$/.test(dateTimeString)) {
@@ -31,7 +31,7 @@ function parseLocalDateString(dateTimeString) {
   return new Date(year, month - 1, day, hour, minute, second || 0)
 }
 
-// Add this new function for consistent database formatting
+// Improved database formatting function
 function formatDateForDB(date) {
   const year = date.getFullYear()
   const month = String(date.getMonth() + 1).padStart(2, "0")
@@ -43,9 +43,23 @@ function formatDateForDB(date) {
   return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`
 }
 
+// Fixed overlap detection function
+function checkTimeOverlap(start1, end1, start2, end2) {
+  // Convert to timestamps for precise comparison
+  const s1 = new Date(start1).getTime()
+  const e1 = new Date(end1).getTime()
+  const s2 = new Date(start2).getTime()
+  const e2 = new Date(end2).getTime()
+
+  // True overlap occurs when:
+  // - New slot starts before existing ends AND new slot ends after existing starts
+  // We need to exclude touching boundaries (adjacent slots are OK)
+  return s1 < e2 && e1 > s2
+}
+
 class AvailabilityController {
   /**
-   * Create availability slot with overlap prevention
+   * Create availability slot with improved overlap prevention
    */
   static async create(req, res) {
     const errors = validationResult(req)
@@ -166,6 +180,14 @@ class AvailabilityController {
           daysOfWeek: recurring.daysOfWeek,
         })
 
+        // Get all existing slots for this provider to check overlaps
+        const existingSlotsQuery = `
+          SELECT start_time, end_time, clinic_id
+          FROM availability_slots 
+          WHERE provider_id = $1 AND provider_type = $2
+        `
+        const existingSlots = await pool.query(existingSlotsQuery, [providerId, providerType])
+
         // Generate slots for each day in the date range
         const currentDate = new Date(startDate)
 
@@ -194,27 +216,26 @@ class AvailabilityController {
                 break
               }
 
-              // Check for overlap for each slot - REGARDLESS of appointment type or clinic
-              // A provider can only have ONE slot at any given time
-              const recurringOverlapQuery = `SELECT id, clinic_id, 
-                CASE WHEN clinic_id IS NULL THEN 'Telemedicine' ELSE 'In-Person' END as appointment_type
-                FROM availability_slots 
-                WHERE provider_id = $1 
-                AND provider_type = $2
-                AND ((start_time <= $3 AND end_time > $3) OR 
-                     (start_time < $4 AND end_time >= $4) OR
-                     (start_time >= $3 AND end_time <= $4))`
+              // Check for overlap with existing slots
+              let hasOverlap = false
+              for (const existingSlot of existingSlots.rows) {
+                if (
+                  checkTimeOverlap(
+                    formatDateForDB(currentSlotStart),
+                    formatDateForDB(currentSlotEnd),
+                    existingSlot.start_time,
+                    existingSlot.end_time,
+                  )
+                ) {
+                  hasOverlap = true
+                  console.log(
+                    `Skipped overlapping slot: ${formatDateForDB(currentSlotStart)} - ${formatDateForDB(currentSlotEnd)} (conflicts with existing slot)`,
+                  )
+                  break
+                }
+              }
 
-              const recurringOverlapParams = [
-                providerId,
-                providerType,
-                formatDateForDB(currentSlotStart),
-                formatDateForDB(currentSlotEnd),
-              ]
-
-              const recurringOverlapCheck = await pool.query(recurringOverlapQuery, recurringOverlapParams)
-
-              if (recurringOverlapCheck.rows.length === 0) {
+              if (!hasOverlap) {
                 // Insert non-overlapping slot
                 const slotResult = await pool.query(
                   "INSERT INTO availability_slots (provider_id, provider_type, clinic_id, start_time, end_time) VALUES ($1, $2, $3, $4, $5) RETURNING *",
@@ -227,12 +248,13 @@ class AvailabilityController {
                   ],
                 )
                 slots.push(slotResult.rows[0])
+                // Add to existing slots for future overlap checks
+                existingSlots.rows.push({
+                  start_time: formatDateForDB(currentSlotStart),
+                  end_time: formatDateForDB(currentSlotEnd),
+                  clinic_id: finalClinicId,
+                })
                 console.log(`Created slot: ${formatDateForDB(currentSlotStart)} - ${formatDateForDB(currentSlotEnd)}`)
-              } else {
-                const conflictingSlot = recurringOverlapCheck.rows[0]
-                console.log(
-                  `Skipped overlapping slot: ${formatDateForDB(currentSlotStart)} - ${formatDateForDB(currentSlotEnd)} (conflicts with ${conflictingSlot.appointment_type} appointment)`,
-                )
               }
 
               // Move to next slot
@@ -348,36 +370,39 @@ class AvailabilityController {
 
       await pool.query("BEGIN")
 
-      // Check for overlapping slots - REGARDLESS of appointment type or clinic
-      // A provider can only have ONE slot at any given time
-      const overlapQuery = `SELECT id, clinic_id, 
-        CASE WHEN clinic_id IS NULL THEN 'Telemedicine' ELSE 'In-Person' END as appointment_type,
-        start_time, end_time
+      // Improved overlap check - get all existing slots and check programmatically
+      const existingSlotsQuery = `
+        SELECT id, clinic_id, start_time, end_time,
+        CASE WHEN clinic_id IS NULL THEN 'Telemedicine' ELSE 'In-Person' END as appointment_type
         FROM availability_slots 
-        WHERE provider_id = $1 
-        AND provider_type = $2
-        AND ((start_time <= $3 AND end_time > $3) OR 
-             (start_time < $4 AND end_time >= $4) OR
-             (start_time >= $3 AND end_time <= $4))`
+        WHERE provider_id = $1 AND provider_type = $2
+      `
 
-      const overlapParams = [providerId, providerType, startTime, endTime]
+      const existingSlots = await pool.query(existingSlotsQuery, [providerId, providerType])
 
-      const overlapCheck = await pool.query(overlapQuery, overlapParams)
+      // Check for actual overlaps
+      const newStartTime = formatDateForDB(start)
+      const newEndTime = formatDateForDB(end)
 
-      if (overlapCheck.rows.length > 0) {
-        await pool.query("ROLLBACK")
-        const conflictingSlot = overlapCheck.rows[0]
-        return res.status(400).json({
-          error: `This slot overlaps with an existing ${conflictingSlot.appointment_type} appointment`,
-          details: `You already have a ${conflictingSlot.appointment_type} slot from ${new Date(conflictingSlot.start_time).toLocaleTimeString()} to ${new Date(conflictingSlot.end_time).toLocaleTimeString()}`,
-          conflictingSlots: overlapCheck.rows,
-        })
+      for (const existingSlot of existingSlots.rows) {
+        if (checkTimeOverlap(newStartTime, newEndTime, existingSlot.start_time, existingSlot.end_time)) {
+          await pool.query("ROLLBACK")
+          return res.status(400).json({
+            error: `This slot overlaps with an existing ${existingSlot.appointment_type} appointment`,
+            details: `You already have a ${existingSlot.appointment_type} slot from ${new Date(existingSlot.start_time).toLocaleTimeString()} to ${new Date(existingSlot.end_time).toLocaleTimeString()}`,
+            conflictingSlots: [existingSlot],
+            debug: {
+              newSlot: { start: newStartTime, end: newEndTime },
+              existingSlot: { start: existingSlot.start_time, end: existingSlot.end_time },
+            },
+          })
+        }
       }
 
       // Create single slot
       const { rows } = await pool.query(
         "INSERT INTO availability_slots (provider_id, provider_type, clinic_id, start_time, end_time) VALUES ($1, $2, $3, $4, $5) RETURNING *",
-        [providerId, providerType, finalClinicId, formatDateForDB(start), formatDateForDB(end)],
+        [providerId, providerType, finalClinicId, newStartTime, newEndTime],
       )
 
       await pool.query("COMMIT")
@@ -577,7 +602,7 @@ class AvailabilityController {
         }
       }
 
-      // Check for overlaps if changing times - REGARDLESS of appointment type
+      // Check for overlaps if changing times
       if (startTime && endTime) {
         const start = new Date(startTime)
         const end = new Date(endTime)
@@ -587,26 +612,32 @@ class AvailabilityController {
           return res.status(400).json({ error: "End time must be after start time" })
         }
 
-        const overlapCheck = await pool.query(
-          `SELECT id, clinic_id,
-           CASE WHEN clinic_id IS NULL THEN 'Telemedicine' ELSE 'In-Person' END as appointment_type
-           FROM availability_slots 
-           WHERE provider_id = $1 
-           AND provider_type = $2
-           AND id != $3
-           AND ((start_time <= $4 AND end_time > $4) OR 
-                (start_time < $5 AND end_time >= $5) OR
-                (start_time >= $4 AND end_time <= $5))`,
-          [slotCheck.rows[0].provider_id, slotCheck.rows[0].provider_type, id, startTime, endTime],
-        )
+        // Get all existing slots except the current one
+        const existingSlotsQuery = `
+          SELECT id, clinic_id, start_time, end_time,
+          CASE WHEN clinic_id IS NULL THEN 'Telemedicine' ELSE 'In-Person' END as appointment_type
+          FROM availability_slots 
+          WHERE provider_id = $1 AND provider_type = $2 AND id != $3
+        `
 
-        if (overlapCheck.rows.length > 0) {
-          await pool.query("ROLLBACK")
-          const conflictingSlot = overlapCheck.rows[0]
-          return res.status(400).json({
-            error: `This slot would overlap with an existing ${conflictingSlot.appointment_type} appointment`,
-            conflictingSlots: overlapCheck.rows,
-          })
+        const existingSlots = await pool.query(existingSlotsQuery, [
+          slotCheck.rows[0].provider_id,
+          slotCheck.rows[0].provider_type,
+          id,
+        ])
+
+        // Check for actual overlaps
+        const newStartTime = formatDateForDB(start)
+        const newEndTime = formatDateForDB(end)
+
+        for (const existingSlot of existingSlots.rows) {
+          if (checkTimeOverlap(newStartTime, newEndTime, existingSlot.start_time, existingSlot.end_time)) {
+            await pool.query("ROLLBACK")
+            return res.status(400).json({
+              error: `This slot would overlap with an existing ${existingSlot.appointment_type} appointment`,
+              conflictingSlots: [existingSlot],
+            })
+          }
         }
       }
 
@@ -623,8 +654,8 @@ class AvailabilityController {
       `
 
       const result = await pool.query(updateQuery, [
-        startTime || null,
-        endTime || null,
+        startTime ? formatDateForDB(new Date(startTime)) : null,
+        endTime ? formatDateForDB(new Date(endTime)) : null,
         isAvailable !== undefined ? isAvailable : null,
         id,
       ])
