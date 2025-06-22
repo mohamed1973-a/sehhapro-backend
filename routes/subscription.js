@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { pool } = require('../config/database');
-const { requirePlatformAdmin, requireClinicAdmin, requireAuth } = require('../middleware/auth');
+const { protect, role } = require('../middleware/auth');
 
 // Get all subscription plans (public)
 router.get('/plans', async (req, res) => {
@@ -28,7 +28,7 @@ router.get('/plans/:id', async (req, res) => {
 });
 
 // Create a new subscription plan (platform admin)
-router.post('/plans', requirePlatformAdmin, async (req, res) => {
+router.post('/plans', protect, role(['platform_admin']), async (req, res) => {
   try {
     const { name, description, price, currency, billing_cycle, features, limits, is_active, is_popular } = req.body;
     const result = await pool.query(
@@ -43,7 +43,7 @@ router.post('/plans', requirePlatformAdmin, async (req, res) => {
 });
 
 // Update a subscription plan (platform admin)
-router.put('/plans/:id', requirePlatformAdmin, async (req, res) => {
+router.put('/plans/:id', protect, role(['platform_admin']), async (req, res) => {
   try {
     const { id } = req.params;
     const { name, description, price, currency, billing_cycle, features, limits, is_active, is_popular } = req.body;
@@ -58,7 +58,7 @@ router.put('/plans/:id', requirePlatformAdmin, async (req, res) => {
 });
 
 // Delete a subscription plan (platform admin)
-router.delete('/plans/:id', requirePlatformAdmin, async (req, res) => {
+router.delete('/plans/:id', protect, role(['platform_admin']), async (req, res) => {
   try {
     const { id } = req.params;
     await pool.query('DELETE FROM subscription_plans WHERE id=$1', [id]);
@@ -69,7 +69,7 @@ router.delete('/plans/:id', requirePlatformAdmin, async (req, res) => {
 });
 
 // Get all clinic subscriptions (platform admin)
-router.get('/subscriptions', requirePlatformAdmin, async (req, res) => {
+router.get('/subscriptions', protect, role(['platform_admin']), async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM clinic_subscriptions');
     res.json({ success: true, data: result.rows });
@@ -79,7 +79,7 @@ router.get('/subscriptions', requirePlatformAdmin, async (req, res) => {
 });
 
 // Get a clinic's subscription (clinic admin)
-router.get('/my-subscription', requireClinicAdmin, async (req, res) => {
+router.get('/my-subscription', protect, role(['clinic_admin']), async (req, res) => {
   try {
     const clinicId = req.user.clinic_id;
     const result = await pool.query('SELECT * FROM clinic_subscriptions WHERE clinic_id=$1 ORDER BY created_at DESC LIMIT 1', [clinicId]);
@@ -90,7 +90,7 @@ router.get('/my-subscription', requireClinicAdmin, async (req, res) => {
 });
 
 // Create/upgrade a clinic subscription (clinic admin)
-router.post('/my-subscription', requireClinicAdmin, async (req, res) => {
+router.post('/my-subscription', protect, role(['clinic_admin']), async (req, res) => {
   try {
     const clinicId = req.user.clinic_id;
     const { plan_id, payment_method_id, total_amount, discount_percentage, discount_amount, end_date, next_billing_date, auto_renew } = req.body;
@@ -106,7 +106,7 @@ router.post('/my-subscription', requireClinicAdmin, async (req, res) => {
 });
 
 // Cancel a clinic subscription (clinic admin)
-router.post('/my-subscription/cancel', requireClinicAdmin, async (req, res) => {
+router.post('/my-subscription/cancel', protect, role(['clinic_admin']), async (req, res) => {
   try {
     const clinicId = req.user.clinic_id;
     await pool.query(
@@ -120,7 +120,7 @@ router.post('/my-subscription/cancel', requireClinicAdmin, async (req, res) => {
 });
 
 // Get all payments for a clinic (clinic admin)
-router.get('/my-payments', requireClinicAdmin, async (req, res) => {
+router.get('/my-payments', protect, role(['clinic_admin']), async (req, res) => {
   try {
     const clinicId = req.user.clinic_id;
     const result = await pool.query('SELECT * FROM subscription_payments WHERE subscription_id IN (SELECT id FROM clinic_subscriptions WHERE clinic_id=$1)', [clinicId]);
@@ -131,7 +131,7 @@ router.get('/my-payments', requireClinicAdmin, async (req, res) => {
 });
 
 // Get all invoices for a clinic (clinic admin)
-router.get('/my-invoices', requireClinicAdmin, async (req, res) => {
+router.get('/my-invoices', protect, role(['clinic_admin']), async (req, res) => {
   try {
     const clinicId = req.user.clinic_id;
     const result = await pool.query('SELECT * FROM subscription_invoices WHERE subscription_id IN (SELECT id FROM clinic_subscriptions WHERE clinic_id=$1)', [clinicId]);
@@ -142,7 +142,7 @@ router.get('/my-invoices', requireClinicAdmin, async (req, res) => {
 });
 
 // Get usage for a clinic (clinic admin)
-router.get('/my-usage', requireClinicAdmin, async (req, res) => {
+router.get('/my-usage', protect, role(['clinic_admin']), async (req, res) => {
   try {
     const clinicId = req.user.clinic_id;
     const result = await pool.query('SELECT * FROM subscription_usage WHERE subscription_id IN (SELECT id FROM clinic_subscriptions WHERE clinic_id=$1)', [clinicId]);
