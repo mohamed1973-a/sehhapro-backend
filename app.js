@@ -31,6 +31,7 @@ const specialtyRoutes = require("./routes/specialties")
 const doctorsPublicRoutes = require("./routes/doctors-public")
 const medicationRoutes = require("./routes/medications")
 const diseaseRoutes = require("./routes/diseases")
+const subscriptionRoutes = require('./routes/subscription')
 
 const app = express()
 
@@ -47,9 +48,12 @@ const allowedOrigins = [
   "https://localhost:3000",
   "https://sehhapro-1.vercel.app", // Your Vercel deployment
   "https://sehhapro.vercel.app", // In case you have a custom domain
+  "https://sehhapromvp.vercel.app", // Current Vercel deployment
   process.env.FRONTEND_URL,
   process.env.NEXT_PUBLIC_APP_URL,
 ].filter(Boolean)
+
+console.log("🌐 Allowed CORS origins:", allowedOrigins)
 
 app.use(
   cors({
@@ -114,6 +118,7 @@ app.use("/api/notifications", notificationRoutes)
 app.use("/api/specialties", specialtyRoutes)
 app.use("/api/medications", medicationRoutes)
 app.use("/api/diseases", diseaseRoutes)
+app.use('/api/subscription', subscriptionRoutes)
 
 // Serve static files
 app.use("/uploads", express.static(path.join(__dirname, "uploads")))
