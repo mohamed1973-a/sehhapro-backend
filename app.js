@@ -49,6 +49,8 @@ const allowedOrigins = [
   "https://sehhapro-1.vercel.app", // Your Vercel deployment
   "https://sehhapro.vercel.app", // In case you have a custom domain
   "https://sehhapromvp.vercel.app", // Current Vercel deployment
+  "https://sehhapro-frontend.vercel.app", // Another possible domain
+  "https://*.vercel.app", // Allow all Vercel subdomains
   process.env.FRONTEND_URL,
   process.env.NEXT_PUBLIC_APP_URL,
 ].filter(Boolean)
@@ -60,6 +62,11 @@ app.use(
     origin: (origin, callback) => {
       // Allow requests with no origin (like mobile apps or curl requests)
       if (!origin) return callback(null, true)
+
+      // Allow all Vercel domains for now
+      if (origin.includes('vercel.app')) {
+        return callback(null, true)
+      }
 
       if (allowedOrigins.indexOf(origin) !== -1) {
         callback(null, true)
