@@ -94,7 +94,12 @@ const AppointmentController = {
       res.status(200).json({ success: true, data: result.rows })
     } catch (error) {
       logger.error(`Get all appointments error: ${error.message}`)
-      res.status(500).json({ success: false, error: "Server error", details: error.message })
+      res.status(500).json({ 
+        success: false, 
+        error: "Failed to retrieve appointments", 
+        details: error.message,
+        code: "APPOINTMENT_FETCH_ERROR"
+      })
     }
   },
 
@@ -108,7 +113,11 @@ const AppointmentController = {
       // Validate that appointmentId is a number
       if (isNaN(appointmentId) || !Number.isInteger(Number(appointmentId))) {
         logger.warn(`Invalid appointment ID format: ${appointmentId}`)
-        return res.status(400).json({ success: false, error: "Invalid appointment ID format" })
+        return res.status(400).json({ 
+          success: false, 
+          error: "Invalid appointment ID format",
+          code: "INVALID_APPOINTMENT_ID"
+        })
       }
 
       logger.info(`Fetching appointment ${appointmentId} for user ${userId} with role ${userRole}`)
@@ -119,7 +128,11 @@ const AppointmentController = {
 
       if (existsResult.rows.length === 0) {
         logger.warn(`Appointment ${appointmentId} not found in database`)
-        return res.status(404).json({ success: false, error: "Appointment not found" })
+        return res.status(404).json({ 
+          success: false, 
+          error: "Appointment not found",
+          code: "APPOINTMENT_NOT_FOUND"
+        })
       }
 
       const appointmentBasic = existsResult.rows[0]
@@ -174,7 +187,11 @@ const AppointmentController = {
 
       if (result.rows.length === 0) {
         logger.warn(`Appointment ${appointmentId} not found or access denied for user ${userId}`)
-        return res.status(404).json({ success: false, error: "Appointment not found or access denied" })
+        return res.status(404).json({ 
+          success: false, 
+          error: "Appointment not found or access denied",
+          code: "APPOINTMENT_ACCESS_DENIED"
+        })
       }
 
       logger.info(`Successfully retrieved appointment ${appointmentId}`)
@@ -182,7 +199,12 @@ const AppointmentController = {
     } catch (error) {
       logger.error(`Get appointment by ID error: ${error.message}`)
       logger.error(`Stack trace: ${error.stack}`)
-      res.status(500).json({ success: false, error: "Server error", details: error.message })
+      res.status(500).json({ 
+        success: false, 
+        error: "Failed to retrieve appointment", 
+        details: error.message,
+        code: "APPOINTMENT_FETCH_ERROR"
+      })
     }
   },
 
@@ -570,13 +592,28 @@ const AppointmentController = {
   async update(req, res) {
     try {
       const appointmentId = req.params.id
-      const { status, notes, checkInTime, checkOutTime } = req.body
+      const { status, notes, checkInTime, checkOutTime, errorReason } = req.body
       const userId = req.user.id
       const userRole = req.user.role
 
+      // Validate status if provided
+      const validStatuses = [
+        'booked', 'in-progress', 'completed', 'cancelled', 
+        'no-show', 'missed', 'late', 'rescheduled', 'error'
+      ]
+      
+      if (status && !validStatuses.includes(status)) {
+        return res.status(400).json({ 
+          success: false, 
+          error: "Invalid appointment status",
+          code: "INVALID_STATUS",
+          validStatuses 
+        })
+      }
+
       // Check if user has permission to update this appointment
       const permissionQuery = `
-        SELECT a.*, s.start_time 
+        SELECT a.*, s.start_time, s.end_time
         FROM appointments a 
         LEFT JOIN availability_slots s ON a.slot_id = s.id 
         WHERE a.id = $1
@@ -585,24 +622,82 @@ const AppointmentController = {
 
       if (permissionResult.rows.length === 0) {
         await req.dbTransaction.rollback()
-        return res.status(404).json({ error: "Appointment not found" })
+        return res.status(404).json({ 
+          success: false, 
+          error: "Appointment not found",
+          code: "APPOINTMENT_NOT_FOUND"
+        })
       }
 
       const appointment = permissionResult.rows[0]
 
-      // Check permissions
-      if (
-        userRole === "patient" &&
-        appointment.patient_id !== userId &&
-        !["cancelled"].includes(status) // Patients can only cancel
-      ) {
-        await req.dbTransaction.rollback()
-        return res.status(403).json({ error: "Access denied" })
+      // Check permissions based on status and role
+      if (userRole === "patient") {
+        // Patients can only cancel or mark as no-show for their own appointments
+        if (appointment.patient_id !== userId) {
+          await req.dbTransaction.rollback()
+          return res.status(403).json({ 
+            success: false, 
+            error: "Access denied - you can only manage your own appointments",
+            code: "ACCESS_DENIED"
+          })
+        }
+        
+        if (status && !['cancelled', 'no-show'].includes(status)) {
+          await req.dbTransaction.rollback()
+          return res.status(403).json({ 
+            success: false, 
+            error: "Patients can only cancel appointments or mark as no-show",
+            code: "INSUFFICIENT_PERMISSIONS"
+          })
+        }
       }
 
       if (userRole === "doctor" && appointment.doctor_id !== userId) {
         await req.dbTransaction.rollback()
-        return res.status(403).json({ error: "Access denied" })
+        return res.status(403).json({ 
+          success: false, 
+          error: "Access denied - you can only manage your own appointments",
+          code: "ACCESS_DENIED"
+        })
+      }
+
+      // Additional validation for specific statuses
+      if (status === 'no-show') {
+        // Check if appointment time has passed
+        if (appointment.start_time && new Date(appointment.start_time) > new Date()) {
+          return res.status(400).json({
+            success: false,
+            error: "Cannot mark as no-show before appointment time",
+            code: "INVALID_NO_SHOW_TIME"
+          })
+        }
+      }
+
+      if (status === 'late') {
+        // Check if appointment is within reasonable time window
+        if (appointment.start_time) {
+          const appointmentTime = new Date(appointment.start_time)
+          const now = new Date()
+          const timeDiff = now.getTime() - appointmentTime.getTime()
+          const minutesLate = Math.floor(timeDiff / (1000 * 60))
+          
+          if (minutesLate < 5) {
+            return res.status(400).json({
+              success: false,
+              error: "Cannot mark as late until 5 minutes after scheduled time",
+              code: "TOO_EARLY_FOR_LATE_STATUS"
+            })
+          }
+          
+          if (minutesLate > 60) {
+            return res.status(400).json({
+              success: false,
+              error: "Appointment is too late to mark as 'late'. Consider marking as 'missed' instead",
+              code: "TOO_LATE_FOR_LATE_STATUS"
+            })
+          }
+        }
       }
 
       // Build update query dynamically
@@ -634,9 +729,20 @@ const AppointmentController = {
         paramCount++
       }
 
+      // Add error reason for error status
+      if (status === 'error' && errorReason) {
+        updates.push(`notes = COALESCE(notes, '') || $${paramCount}`)
+        params.push(`\nError Reason: ${errorReason}`)
+        paramCount++
+      }
+
       if (updates.length === 0) {
         await req.dbTransaction.rollback()
-        return res.status(400).json({ error: "No valid fields to update" })
+        return res.status(400).json({ 
+          success: false, 
+          error: "No valid fields to update",
+          code: "NO_UPDATES_PROVIDED"
+        })
       }
 
       updates.push(`updated_at = NOW()`)
@@ -651,32 +757,48 @@ const AppointmentController = {
 
       const result = await req.dbTransaction.query(updateQuery, params)
 
-      // If appointment is cancelled, make the slot available again
-      if (status === "cancelled" && appointment.slot_id) {
-        console.log("=== SLOT CANCELLATION DEBUG ===")
-        console.log("Marking slot as available due to cancellation:", appointment.slot_id)
-
-        const cancelUpdateResult = await req.dbTransaction.query(
-          "UPDATE availability_slots SET is_available = TRUE WHERE id = $1 RETURNING id, is_available",
-          [appointment.slot_id],
-        )
-
-        console.log("Cancellation update result:", cancelUpdateResult.rows[0])
-        console.log("=== END SLOT CANCELLATION ===")
+      // Handle slot availability based on status
+      if (appointment.slot_id) {
+        if (['cancelled', 'no-show', 'missed', 'error'].includes(status)) {
+          // Make slot available again for these statuses
+          console.log(`Marking slot ${appointment.slot_id} as available due to status: ${status}`)
+          
+          const slotUpdateResult = await req.dbTransaction.query(
+            "UPDATE availability_slots SET is_available = TRUE WHERE id = $1 RETURNING id, is_available",
+            [appointment.slot_id],
+          )
+          
+          console.log("Slot update result:", slotUpdateResult.rows[0])
+        } else if (status === 'in-progress') {
+          // Ensure slot is marked as unavailable when appointment starts
+          await req.dbTransaction.query(
+            "UPDATE availability_slots SET is_available = FALSE WHERE id = $1",
+            [appointment.slot_id],
+          )
+        }
       }
 
       // Commit the transaction
       await req.dbTransaction.commit()
 
-      logger.info(`Appointment updated: ${appointmentId}`)
-      res.status(200).json({ success: true, data: result.rows[0] })
+      logger.info(`Appointment ${appointmentId} updated to status: ${status || 'unchanged'}`)
+      res.status(200).json({ 
+        success: true, 
+        data: result.rows[0],
+        message: `Appointment ${status ? `marked as ${status}` : 'updated'} successfully`
+      })
     } catch (error) {
       // Rollback transaction on error
       if (req.dbTransaction) {
         await req.dbTransaction.rollback()
       }
       logger.error(`Update appointment error: ${error.message}`)
-      res.status(500).json({ success: false, error: "Server error", details: error.message })
+      res.status(500).json({ 
+        success: false, 
+        error: "Failed to update appointment", 
+        details: error.message,
+        code: "UPDATE_ERROR"
+      })
     }
   },
 
@@ -1407,7 +1529,12 @@ const AppointmentController = {
       logger.error(`Update appointment notes error: ${error.message}`)
       logger.error(`Query: ${error.query || "N/A"}`)
       logger.error(`Params: ${JSON.stringify(error.params || [])}`)
-      res.status(500).json({ success: false, error: "Server error", details: error.message })
+      res.status(500).json({ 
+        success: false, 
+        error: "Failed to update appointment notes", 
+        details: error.message,
+        code: "NOTES_UPDATE_ERROR"
+      })
     }
   },
 }

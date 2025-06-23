@@ -31,11 +31,12 @@ class UserStatsController {
         `
         SELECT 
           COUNT(*) as total_appointments,
-          COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed_appointments,
-          COUNT(CASE WHEN status = 'booked' AND appointment_time > NOW() THEN 1 END) as upcoming_appointments,
-          COUNT(CASE WHEN status = 'cancelled' THEN 1 END) as cancelled_appointments
-        FROM appointments 
-        WHERE patient_id = $1 OR doctor_id = $1
+          COUNT(CASE WHEN a.status = 'completed' THEN 1 END) as completed_appointments,
+          COUNT(CASE WHEN a.status = 'booked' AND s.start_time > NOW() THEN 1 END) as upcoming_appointments,
+          COUNT(CASE WHEN a.status = 'cancelled' THEN 1 END) as cancelled_appointments
+        FROM appointments a
+        LEFT JOIN availability_slots s ON a.slot_id = s.id
+        WHERE a.patient_id = $1 OR a.doctor_id = $1
       `,
         [id],
       )

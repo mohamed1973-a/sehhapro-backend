@@ -55,6 +55,17 @@ const protect = async (req, res, next) => {
         userId: result.rows[0].id, // Add userId for compatibility
       }
 
+      // Patch: Attach clinic_id for clinic_admins
+      if (req.user.role === "clinic_admin") {
+        const clinicResult = await executeQuery(
+          "SELECT clinic_id FROM admin_clinics WHERE admin_id = $1 LIMIT 1",
+          [req.user.id]
+        );
+        if (clinicResult.rows.length > 0) {
+          req.user.clinic_id = clinicResult.rows[0].clinic_id;
+        }
+      }
+
       logger.info(`User authenticated: ${req.user.id} (${req.user.role})`)
       next()
     } catch (error) {

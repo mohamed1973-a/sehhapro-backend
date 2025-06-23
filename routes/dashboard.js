@@ -18,11 +18,16 @@ router.get("/platform-admin/stats", protect, role(["platform_admin"]), async (re
       totalAppointments: "SELECT COUNT(*) as count FROM appointments",
       totalMedications: "SELECT COUNT(*) as count FROM medications",
       activeUsers: `SELECT COUNT(DISTINCT user_id) as count FROM refresh_tokens WHERE created_at > NOW() - INTERVAL '15 minutes'`,
-      userDistribution: "SELECT role, COUNT(*) as count FROM users GROUP BY role",
+      userDistribution: `
+        SELECT r.name as role, COUNT(*) as count 
+        FROM users u 
+        JOIN roles r ON u.role_id = r.id 
+        GROUP BY r.name
+      `,
       userGrowth: `
-        SELECT TO_CHAR(created_at, 'YYYY-MM') as month, COUNT(*) as users
-        FROM users 
-        WHERE created_at > NOW() - INTERVAL '12 months' 
+        SELECT TO_CHAR(u.created_at, 'YYYY-MM') as month, COUNT(*) as users
+        FROM users u
+        WHERE u.created_at > NOW() - INTERVAL '12 months' 
         GROUP BY month ORDER BY month
       `,
       clinicGrowth: `
@@ -33,7 +38,7 @@ router.get("/platform-admin/stats", protect, role(["platform_admin"]), async (re
       `,
       recentActivity: `
         SELECT id, type, description, created_at as timestamp, 'info' as severity
-        FROM activity_logs
+        FROM audit_log
         ORDER BY created_at DESC
         LIMIT 5
       `,
@@ -41,7 +46,19 @@ router.get("/platform-admin/stats", protect, role(["platform_admin"]), async (re
 
     const results = {};
     for (const key in queries) {
+      try {
       results[key] = await pool.query(queries[key]);
+      } catch (queryError) {
+        console.error(`Error executing query ${key}:`, queryError);
+        // Provide fallback data for failed queries
+        if (key === 'userDistribution') {
+          results[key] = { rows: [] };
+        } else if (key === 'recentActivity') {
+          results[key] = { rows: [] };
+        } else {
+          results[key] = { rows: [{ count: 0 }] };
+        }
+      }
     }
 
     const userGrowthMap = new Map(results.userGrowth.rows.map(r => [r.month, r.users]));
@@ -63,30 +80,50 @@ router.get("/platform-admin/stats", protect, role(["platform_admin"]), async (re
     const errorRate = Math.random() * 5; // 0-5%
     const systemHealth = (100 - errorRate).toFixed(1);
 
+    // Get subscription data
+    const subscriptionStats = await pool.query(`
+      SELECT 
+        COUNT(*) as total_subscriptions,
+        COUNT(CASE WHEN status = 'active' THEN 1 END) as active_subscriptions,
+        SUM(CASE WHEN status = 'active' THEN total_amount ELSE 0 END) as total_revenue
+      FROM clinic_subscriptions
+    `).catch(() => ({ rows: [{ total_subscriptions: 0, active_subscriptions: 0, total_revenue: 0 }] }));
+
     const stats = {
-      totalUsers: parseInt(results.totalUsers.rows[0].count),
-      totalClinics: parseInt(results.totalClinics.rows[0].count),
-      totalAppointments: parseInt(results.totalAppointments.rows[0].count),
-      totalMedications: parseInt(results.totalMedications.rows[0].count),
-      activeUsers: parseInt(results.activeUsers.rows[0].count),
+      totalUsers: parseInt(results.totalUsers.rows[0]?.count || 0),
+      totalClinics: parseInt(results.totalClinics.rows[0]?.count || 0),
+      totalAppointments: parseInt(results.totalAppointments.rows[0]?.count || 0),
+      totalMedications: parseInt(results.totalMedications.rows[0]?.count || 0),
+      activeUsers: parseInt(results.activeUsers.rows[0]?.count || 0),
       systemHealth: parseFloat(systemHealth),
       userDistribution,
       userGrowth: growthData,
       recentActivity: results.recentActivity.rows,
-      monthlyRevenue: Math.floor(Math.random() * 50000) + 100000, // Mock
-      monthlyAppointments: Math.floor(Math.random() * 1000) + 2000, // Mock
+      totalDoctors,
+      totalNurses,
+      totalPatients,
+      totalLabTechs,
+      totalSubscriptions: parseInt(subscriptionStats.rows[0]?.total_subscriptions || 0),
+      activeSubscriptions: parseInt(subscriptionStats.rows[0]?.active_subscriptions || 0),
+      totalRevenue: parseFloat(subscriptionStats.rows[0]?.total_revenue || 0),
+      monthlyRevenue: Math.floor(Math.random() * 5000000) + 1000000, // Mock monthly revenue
+      monthlyAppointments: Math.floor(Math.random() * 5000) + 1000, // Mock monthly appointments
       systemMetrics: {
-        cpuUsage: Math.floor(Math.random() * 30) + 20,
-        memoryUsage: Math.floor(Math.random() * 40) + 30,
-        diskUsage: Math.floor(Math.random() * 20) + 40,
-        networkLatency: Math.floor(Math.random() * 50) + 10,
-      },
+        cpuUsage: Math.floor(Math.random() * 30) + 20, // 20-50%
+        memoryUsage: Math.floor(Math.random() * 40) + 30, // 30-70%
+        diskUsage: Math.floor(Math.random() * 20) + 40, // 40-60%
+        networkLatency: Math.floor(Math.random() * 50) + 10, // 10-60ms
+      }
     };
 
     res.json({ success: true, data: stats });
   } catch (error) {
-    logger.error(`Error fetching platform admin statistics: ${error.message}`);
-    res.status(500).json({ success: false, message: "Error fetching platform admin statistics" });
+    console.error("Error fetching platform admin statistics:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: `Error fetching platform admin statistics: ${error.message}`,
+      error: error.message
+    });
   }
 });
 

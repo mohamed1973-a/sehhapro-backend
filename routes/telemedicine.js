@@ -115,4 +115,14 @@ router.post(
   TelemedicineController.sendMessage,
 )
 
+// Get telemedicine session by appointment ID
+router.get(
+  "/appointment/:appointmentId",
+  protect,
+  role(["doctor", "patient"]),
+  [param("appointmentId").isInt().withMessage("Appointment ID must be an integer")],
+  validate,
+  TelemedicineController.getByAppointmentId,
+)
+
 module.exports = router

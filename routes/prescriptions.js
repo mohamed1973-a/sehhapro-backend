@@ -116,21 +116,6 @@ router.post(
 )
 
 /**
- * @route   POST /api/prescriptions/:id/refill
- * @desc    Request a refill for a prescription
- * @access  Private (Patient only - own prescription)
- */
-router.post(
-  "/:id/refill",
-  protect,
-  role(["patient"]),
-  [param("id").isInt().withMessage("Prescription ID must be an integer")],
-  validate,
-  transactionMiddleware,
-  PrescriptionController.requestRefill,
-)
-
-/**
  * @route   GET /api/prescriptions/:id
  * @desc    Get single prescription by ID
  * @access  Private (Patient: own prescription, Doctor: own prescription, Admin: clinic prescription)

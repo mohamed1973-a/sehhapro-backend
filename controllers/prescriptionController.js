@@ -270,7 +270,7 @@ class PrescriptionController {
       }
 
       // Add additional filters
-      if (status) {
+      if (status && status !== "all") {
         whereConditions.push(`p.status = $${paramCount}`)
         params.push(status)
         paramCount++

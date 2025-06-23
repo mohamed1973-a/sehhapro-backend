@@ -202,8 +202,8 @@ router.get("/profile", protect, async (req, res) => {
 
     const query = `
       SELECT u.id, u.full_name, u.email, u.phone, u.created_at,
-             pm.emergency_contact_name, pm.emergency_contact_phone, pm.allergies, 
-             pm.insurance_provider, pm.insurance_policy_number
+             pm.emergency_contact_name, pm.emergency_contact_phone, pm.emergency_contact_relationship, pm.allergies, 
+             pm.insurance_provider, pm.insurance_policy_number, pm.blood_type
       FROM users u
       LEFT JOIN patient_medical_profiles pm ON u.id = pm.patient_id
       WHERE u.id = $1
@@ -243,9 +243,11 @@ router.put("/profile", protect, async (req, res) => {
       phone,
       emergency_contact_name,
       emergency_contact_phone,
+      emergency_contact_relationship,
       allergies,
       insurance_provider,
       insurance_policy_number,
+      blood_type,
     } = req.body
 
     // Update user table
@@ -263,15 +265,17 @@ router.put("/profile", protect, async (req, res) => {
     // Update or insert medical profile
     const medicalProfileQuery = `
       INSERT INTO patient_medical_profiles 
-      (patient_id, emergency_contact_name, emergency_contact_phone, allergies, insurance_provider, insurance_policy_number)
-      VALUES ($1, $2, $3, $4, $5, $6)
+      (patient_id, emergency_contact_name, emergency_contact_phone, emergency_contact_relationship, allergies, insurance_provider, insurance_policy_number, blood_type)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
       ON CONFLICT (patient_id) 
       DO UPDATE SET
         emergency_contact_name = COALESCE($2, patient_medical_profiles.emergency_contact_name),
         emergency_contact_phone = COALESCE($3, patient_medical_profiles.emergency_contact_phone),
-        allergies = COALESCE($4, patient_medical_profiles.allergies),
-        insurance_provider = COALESCE($5, patient_medical_profiles.insurance_provider),
-        insurance_policy_number = COALESCE($6, patient_medical_profiles.insurance_policy_number),
+        emergency_contact_relationship = COALESCE($4, patient_medical_profiles.emergency_contact_relationship),
+        allergies = COALESCE($5, patient_medical_profiles.allergies),
+        insurance_provider = COALESCE($6, patient_medical_profiles.insurance_provider),
+        insurance_policy_number = COALESCE($7, patient_medical_profiles.insurance_policy_number),
+        blood_type = COALESCE($8, patient_medical_profiles.blood_type),
         updated_at = NOW()
     `
 
@@ -279,9 +283,11 @@ router.put("/profile", protect, async (req, res) => {
       userId,
       emergency_contact_name,
       emergency_contact_phone,
+      emergency_contact_relationship,
       allergies,
       insurance_provider,
       insurance_policy_number,
+      blood_type,
     ])
 
     res.status(200).json({
@@ -356,7 +362,7 @@ router.get(
       SELECT 
         'appointment' as entry_type,
         a.id as entry_id,
-        a.appointment_time as entry_date,
+        s.start_time as entry_date,
         a.reason as title,
         a.notes as content,
         a.status,
@@ -366,6 +372,7 @@ router.get(
       FROM appointments a
       LEFT JOIN users doc ON a.doctor_id = doc.id
       LEFT JOIN clinics c ON a.clinic_id = c.id
+      LEFT JOIN availability_slots s ON a.slot_id = s.id
       WHERE a.patient_id = $1
 
       UNION ALL
@@ -448,7 +455,7 @@ router.get(
       const recentAppointmentsQuery = `
       SELECT 
         a.id,
-        a.appointment_time,
+        s.start_time as appointment_time,
         a.reason,
         a.status,
         a.type,
@@ -457,8 +464,9 @@ router.get(
       FROM appointments a
       LEFT JOIN users doc ON a.doctor_id = doc.id
       LEFT JOIN clinics c ON a.clinic_id = c.id
+      LEFT JOIN availability_slots s ON a.slot_id = s.id
       WHERE a.patient_id = $1
-      ORDER BY a.appointment_time DESC
+      ORDER BY s.start_time DESC
       LIMIT 10
     `
 

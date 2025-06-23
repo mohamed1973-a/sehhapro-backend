@@ -95,26 +95,25 @@ class TelemedicineController {
   static async getById(req, res) {
     try {
       const { id } = req.params
+      const userRole = req.user.role
 
-      if (!req.user || !req.user.id || !req.user.role) {
-        return res.status(401).json({ error: "Unauthorized: Missing or invalid user data" })
+      if (!req.user || !req.user.id) {
+        return res.status(401).json({ error: "Unauthorized" })
       }
 
-      const role = req.user.role.toLowerCase()
       let query, params
 
-      // Build authorization query based on role
-      switch (role) {
+      switch (userRole) {
         case "patient":
           query = `
             SELECT ts.*, a.reason, a.specialty,
                    u1.full_name AS patient_name, u2.full_name AS doctor_name,
-                   s.start_time AS scheduled_time, s.end_time AS scheduled_end_time
+                   s.start_time AS appointment_time, s.end_time AS appointment_end_time
             FROM telemedicine_sessions ts
             JOIN appointments a ON ts.appointment_id = a.id
             JOIN users u1 ON ts.patient_id = u1.id
             JOIN users u2 ON ts.doctor_id = u2.id
-            JOIN availability_slots s ON a.slot_id = s.id
+            LEFT JOIN availability_slots s ON a.slot_id = s.id
             WHERE ts.id = $1 AND ts.patient_id = $2
           `
           params = [id, req.user.id]
@@ -124,59 +123,80 @@ class TelemedicineController {
           query = `
             SELECT ts.*, a.reason, a.specialty,
                    u1.full_name AS patient_name, u2.full_name AS doctor_name,
-                   s.start_time AS scheduled_time, s.end_time AS scheduled_end_time
+                   s.start_time AS appointment_time, s.end_time AS appointment_end_time
             FROM telemedicine_sessions ts
             JOIN appointments a ON ts.appointment_id = a.id
             JOIN users u1 ON ts.patient_id = u1.id
             JOIN users u2 ON ts.doctor_id = u2.id
-            JOIN availability_slots s ON a.slot_id = s.id
+            LEFT JOIN availability_slots s ON a.slot_id = s.id
             WHERE ts.id = $1 AND ts.doctor_id = $2
           `
           params = [id, req.user.id]
           break
 
-        case "clinic_admin":
         case "platform_admin":
           query = `
             SELECT ts.*, a.reason, a.specialty,
                    u1.full_name AS patient_name, u2.full_name AS doctor_name,
-                   s.start_time AS scheduled_time, s.end_time AS scheduled_end_time
+                   s.start_time AS appointment_time, s.end_time AS appointment_end_time
             FROM telemedicine_sessions ts
             JOIN appointments a ON ts.appointment_id = a.id
             JOIN users u1 ON ts.patient_id = u1.id
             JOIN users u2 ON ts.doctor_id = u2.id
-            JOIN availability_slots s ON a.slot_id = s.id
+            LEFT JOIN availability_slots s ON a.slot_id = s.id
             WHERE ts.id = $1
           `
           params = [id]
           break
 
         default:
-          return res.status(403).json({ error: "Forbidden: Invalid role" })
+          return res.status(403).json({ 
+            error: "Forbidden: Invalid role",
+            message: "Access denied"
+          })
       }
 
       const result = await executeQuery(query, params)
 
       if (result.rows.length === 0) {
-        return res.status(404).json({ error: "Telemedicine session not found or unauthorized" })
+        return res.status(404).json({ 
+          error: "Telemedicine session not found or unauthorized",
+          message: "Telemedicine session not found"
+        })
       }
 
       const session = result.rows[0]
 
-      // Add computed fields
-      session.canStart =
-        session.status === "scheduled" && new Date(session.scheduled_time) <= new Date(Date.now() + 15 * 60 * 1000)
+      // Add computed fields and timing validation
+      const scheduledTime = new Date(session.scheduled_time || session.appointment_time)
+      const now = new Date()
+      const timeDiff = scheduledTime.getTime() - now.getTime()
+      const minutesUntilAppointment = Math.floor(timeDiff / (1000 * 60))
+
+      session.canStart = session.status === "scheduled" && scheduledTime <= new Date(now.getTime() + 15 * 60 * 1000)
       session.canJoin = session.status === "in-progress"
-      session.formattedDate = new Date(session.scheduled_time).toLocaleDateString()
-      session.formattedTime = new Date(session.scheduled_time).toLocaleTimeString([], {
+      session.formattedDate = scheduledTime.toLocaleDateString()
+      session.formattedTime = scheduledTime.toLocaleTimeString([], {
         hour: "2-digit",
         minute: "2-digit",
       })
+      
+      // Add timing information
+      session.appointmentTime = scheduledTime.toISOString()
+      session.currentTime = now.toISOString()
+      session.timeDiff = timeDiff
+      session.minutesUntilAppointment = minutesUntilAppointment
+      session.isExpired = timeDiff < 0
+      session.isTooEarly = timeDiff > 15 * 60 * 1000 // More than 15 minutes early
 
       res.status(200).json(session)
     } catch (err) {
       logger.error(`Get telemedicine session by ID error: ${err.message}`)
-      res.status(500).json({ error: "Server error", details: err.message })
+      res.status(500).json({ 
+        error: "Server error", 
+        details: err.message,
+        message: "Failed to load session"
+      })
     }
   }
 
@@ -279,26 +299,60 @@ class TelemedicineController {
       )
 
       if (sessionResult.rows.length === 0) {
-        return res.status(404).json({ error: "Session not found or unauthorized" })
+        return res.status(404).json({ 
+          error: "Session not found or unauthorized",
+          message: "Telemedicine session not found"
+        })
       }
 
       const session = sessionResult.rows[0]
 
       if (session.status !== "scheduled") {
-        return res.status(400).json({ error: "Session must be in 'scheduled' status to start" })
+        return res.status(400).json({ 
+          error: "Session must be in 'scheduled' status to start",
+          message: "Invalid session status"
+        })
       }
 
       // Check if session can be started (15 minutes before scheduled time)
-      const scheduledTime = new Date(session.scheduled_time)
+      const scheduledTime = new Date(session.scheduled_time || session.appointment_time)
       const now = new Date()
+      const timeDiff = scheduledTime.getTime() - now.getTime()
+      const minutesUntilAppointment = Math.floor(timeDiff / (1000 * 60))
       const canStart = scheduledTime <= new Date(now.getTime() + 15 * 60 * 1000)
 
       if (!canStart) {
+        if (timeDiff > 0) {
+          // Session is in the future
+          if (minutesUntilAppointment > 15) {
         return res.status(400).json({
-          error: "Session can only be started 15 minutes before scheduled time",
+              error: `Session can only be started 15 minutes before scheduled time. Please wait ${minutesUntilAppointment - 15} more minutes.`,
+              message: "Session not yet available",
           scheduledTime: scheduledTime.toISOString(),
           currentTime: now.toISOString(),
-        })
+              minutesUntilAvailable: minutesUntilAppointment - 15,
+              appointmentTime: scheduledTime.toISOString()
+            })
+          } else {
+            return res.status(400).json({
+              error: `Session will be available in ${minutesUntilAppointment} minutes. Please wait a bit longer.`,
+              message: "Session starting soon",
+              scheduledTime: scheduledTime.toISOString(),
+              currentTime: now.toISOString(),
+              minutesUntilAvailable: minutesUntilAppointment,
+              appointmentTime: scheduledTime.toISOString()
+            })
+          }
+        } else {
+          // Session is in the past
+          return res.status(410).json({
+            error: "This telemedicine session has already passed. Please contact your healthcare provider to reschedule.",
+            message: "Session has expired",
+            scheduledTime: scheduledTime.toISOString(),
+            currentTime: now.toISOString(),
+            isExpired: true
+          })
+        }
       }
 
       // Generate session URL and meeting ID if not exists
@@ -815,6 +869,7 @@ class TelemedicineController {
           })
 
           await pool.query("COMMIT")
+          logger.info(`Teleconsultation scheduled for patient: ${req.user.id} with doctor: ${doctorId}`)
 
           const session = {
             ...sessionResult.rows[0],
@@ -824,7 +879,7 @@ class TelemedicineController {
             actual_date: actualDate,
           }
 
-          return res.status(201).json({
+          res.status(201).json({
             message: `Teleconsultation scheduled with ${doctorName} at ${formattedDate}`,
             session: session,
           })
@@ -1278,6 +1333,95 @@ class TelemedicineController {
     } catch (err) {
       await pool.query("ROLLBACK")
       logger.error(`End telemedicine session error: ${err.message}`)
+      res.status(500).json({ error: "Server error", details: err.message })
+    }
+  }
+
+  /**
+   * Get telemedicine session by appointment ID
+   */
+  static async getByAppointmentId(req, res) {
+    try {
+      const { appointmentId } = req.params
+
+      if (!req.user || !req.user.id) {
+        return res.status(401).json({ error: "Unauthorized" })
+      }
+
+      // Get session details by appointment ID
+      const result = await executeQuery(
+        `SELECT ts.*, a.status as appointment_status,
+                u1.full_name AS patient_name, u2.full_name AS doctor_name,
+                s.start_time AS appointment_time, s.end_time AS appointment_end_time
+         FROM telemedicine_sessions ts 
+         JOIN appointments a ON ts.appointment_id = a.id 
+         JOIN users u1 ON ts.patient_id = u1.id
+         JOIN users u2 ON ts.doctor_id = u2.id
+         LEFT JOIN availability_slots s ON a.slot_id = s.id
+         WHERE ts.appointment_id = $1 AND (ts.patient_id = $2 OR ts.doctor_id = $2)`,
+        [appointmentId, req.user.id],
+      )
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({ 
+          error: "Session not found or unauthorized",
+          message: "Telemedicine session not found for this appointment"
+        })
+      }
+
+      const session = result.rows[0]
+
+      // Check timing validation
+      const appointmentTime = new Date(session.appointment_time || session.scheduled_time)
+      const now = new Date()
+      const fifteenMinutesBefore = new Date(appointmentTime.getTime() - 15 * 60 * 1000)
+      const thirtyMinutesAfter = new Date(appointmentTime.getTime() + 30 * 60 * 1000)
+
+      // Determine if session can be joined
+      let canJoin = false
+      let joinMessage = ""
+
+      if (now < fifteenMinutesBefore) {
+        const minutesUntilJoin = Math.floor((fifteenMinutesBefore.getTime() - now.getTime()) / (1000 * 60))
+        joinMessage = `Session will be available in ${minutesUntilJoin} minutes`
+      } else if (now > thirtyMinutesAfter) {
+        joinMessage = "Session has already passed"
+      } else {
+        canJoin = true
+        joinMessage = "Session is available"
+      }
+
+      res.status(200).json({
+        success: true,
+        data: {
+          id: session.id,
+          appointment_id: session.appointment_id,
+          patient_id: session.patient_id,
+          doctor_id: session.doctor_id,
+          status: session.status,
+          scheduled_time: session.scheduled_time,
+          start_time: session.start_time,
+          end_time: session.end_time,
+          video_link: session.video_link,
+          session_url: session.session_url,
+          meeting_id: session.meeting_id,
+          platform: session.platform,
+          patient_name: session.patient_name,
+          doctor_name: session.doctor_name,
+          appointment_status: session.appointment_status,
+          appointment_time: session.appointment_time,
+          can_join: canJoin,
+          join_message: joinMessage,
+          timing: {
+            appointment_time: appointmentTime.toISOString(),
+            current_time: now.toISOString(),
+            earliest_join_time: fifteenMinutesBefore.toISOString(),
+            latest_join_time: thirtyMinutesAfter.toISOString()
+          }
+        }
+      })
+    } catch (err) {
+      logger.error(`Get telemedicine session by appointment ID error: ${err.message}`)
       res.status(500).json({ error: "Server error", details: err.message })
     }
   }

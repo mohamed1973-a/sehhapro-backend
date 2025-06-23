@@ -91,7 +91,7 @@ class RecordController {
       // Use the validated record type in the insert query
       const result = await pool.query(
         `INSERT INTO medical_records 
-         (patient_id, doctor_id, clinic_id, appointment_id, record_type, diagnosis, treatment, notes) 
+         (patient_id, doctor_id, clinic_id, appointment_id, entry_type, diagnosis, treatment, notes) 
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
          RETURNING *`,
         [patientId, req.user.id, clinicId, appointmentId, recordType, diagnosis, treatment, notes],
@@ -117,7 +117,7 @@ class RecordController {
                  a.id AS appointment_id, a.type AS appointment_type
           FROM medical_records mr 
           JOIN users u ON mr.doctor_id = u.id
-          JOIN clinics c ON mr.clinic_id = c.id
+          LEFT JOIN clinics c ON mr.clinic_id = c.id
           LEFT JOIN appointments a ON mr.appointment_id = a.id
           WHERE mr.patient_id = $1 
           ORDER BY mr.created_at DESC
@@ -129,7 +129,7 @@ class RecordController {
                  a.id AS appointment_id, a.type AS appointment_type
           FROM medical_records mr 
           JOIN users u ON mr.patient_id = u.id
-          JOIN clinics c ON mr.clinic_id = c.id
+          LEFT JOIN clinics c ON mr.clinic_id = c.id
           LEFT JOIN appointments a ON mr.appointment_id = a.id
           WHERE mr.doctor_id = $1 
           ORDER BY mr.created_at DESC
@@ -146,7 +146,7 @@ class RecordController {
           FROM medical_records mr 
           JOIN users up ON mr.patient_id = up.id
           JOIN users ud ON mr.doctor_id = ud.id
-          JOIN clinics c ON mr.clinic_id = c.id
+          LEFT JOIN clinics c ON mr.clinic_id = c.id
           LEFT JOIN appointments a ON mr.appointment_id = a.id
           ORDER BY mr.created_at DESC
         `
@@ -204,7 +204,7 @@ class RecordController {
                a.id AS appointment_id, a.type AS appointment_type
         FROM medical_records mr 
         JOIN users u ON mr.doctor_id = u.id
-        JOIN clinics c ON mr.clinic_id = c.id
+        LEFT JOIN clinics c ON mr.clinic_id = c.id
         LEFT JOIN appointments a ON mr.appointment_id = a.id
         WHERE mr.patient_id = $1 
         ORDER BY mr.created_at DESC

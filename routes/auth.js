@@ -4,6 +4,7 @@ const AuthController = require("../controllers/authController")
 const { body } = require("express-validator")
 const { validate } = require("../middleware/validator")
 const { protect } = require("../middleware/auth")
+const { pool } = require("../config/database")
 
 // Register a new user
 router.post(
@@ -72,6 +73,17 @@ router.post(
 // Protected route to get current user
 router.get("/me", protect, async (req, res) => {
   try {
+    let clinic_id = req.user.clinic_id;
+    // If user is clinic_admin or lab_admin and clinic_id is not set, fetch from admin_clinics
+    if ((req.user.role === "clinic_admin" || req.user.role === "lab_admin") && !clinic_id) {
+      const result = await pool.query(
+        "SELECT clinic_id FROM admin_clinics WHERE admin_id = $1 LIMIT 1",
+        [req.user.id]
+      );
+      if (result.rows.length > 0) {
+        clinic_id = result.rows[0].clinic_id;
+      }
+    }
     res.json({
       success: true,
       user: {
@@ -79,17 +91,17 @@ router.get("/me", protect, async (req, res) => {
         email: req.user.email,
         full_name: req.user.full_name,
         role: req.user.role,
-        clinic_id: req.user.clinic_id,
+        clinic_id,
         phone: req.user.phone,
       },
-    })
+    });
   } catch (error) {
-    console.error("Get user info error:", error)
+    console.error("Get user info error:", error);
     res.status(500).json({
       success: false,
       error: "Failed to get user information",
-    })
+    });
   }
-})
+});
 
 module.exports = router
