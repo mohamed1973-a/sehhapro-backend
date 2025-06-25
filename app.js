@@ -32,6 +32,7 @@ const doctorsPublicRoutes = require("./routes/doctors-public")
 const medicationRoutes = require("./routes/medications")
 const diseaseRoutes = require("./routes/diseases")
 const subscriptionRoutes = require('./routes/subscription')
+const patientBalanceRoutes = require('./routes/patientBalance')
 
 const app = express()
 
@@ -126,6 +127,7 @@ app.use("/api/specialties", specialtyRoutes)
 app.use("/api/medications", medicationRoutes)
 app.use("/api/diseases", diseaseRoutes)
 app.use('/api/subscription', subscriptionRoutes)
+app.use('/api/patientBalance', patientBalanceRoutes)
 
 // Serve static files
 app.use("/uploads", express.static(path.join(__dirname, "uploads")))

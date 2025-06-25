@@ -926,7 +926,7 @@ const AppointmentController = {
       const clinic = clinicResult.rows[0]
 
       // Get comprehensive stats for the clinic
-      const statsQuery = `
+      const appointmentStatsQuery = `
         SELECT 
           COUNT(*) as total_appointments,
           COUNT(CASE WHEN a.status = 'booked' THEN 1 END) as booked_appointments,
@@ -943,8 +943,27 @@ const AppointmentController = {
         WHERE a.clinic_id = $1
       `
 
-      const statsResult = await executeQuery(statsQuery, [clinicId])
-      const stats = statsResult.rows[0]
+      const appointmentStatsResult = await executeQuery(appointmentStatsQuery, [clinicId])
+      const appointmentStats = appointmentStatsResult.rows[0]
+
+      // Get staff counts
+      const staffCountsQuery = `
+        SELECT 
+          (SELECT COUNT(*) FROM doctor_clinics WHERE clinic_id = $1) as doctors,
+          (SELECT COUNT(*) FROM nurse_clinics WHERE clinic_id = $1) as nurses,
+          (SELECT COUNT(*) FROM lab_clinics WHERE clinic_id = $1) as labs,
+          (SELECT COUNT(*) FROM admin_clinics WHERE clinic_id = $1) as admins
+      `
+      const staffCountsResult = await executeQuery(staffCountsQuery, [clinicId])
+      const staffCounts = staffCountsResult.rows[0]
+      const totalStaff = (parseInt(staffCounts.doctors) || 0) +
+                         (parseInt(staffCounts.nurses) || 0) +
+                         (parseInt(staffCounts.labs) || 0) +
+                         (parseInt(staffCounts.admins) || 0)
+      
+      // Calculate revenue (use dynamic price)
+      const revenuePerAppointment = parseFloat(clinic.appointment_price) || 0;
+      const totalRevenue = (parseInt(appointmentStats.completed_appointments) || 0) * revenuePerAppointment;
 
       // Get monthly stats for the last 6 months
       const monthlyStatsQuery = `
@@ -969,16 +988,18 @@ const AppointmentController = {
           id: clinic.id,
           name: clinic.name,
         },
-        totalPatients: Number.parseInt(stats.total_patients) || 0,
-        totalAppointments: Number.parseInt(stats.total_appointments) || 0,
-        todayAppointments: Number.parseInt(stats.today_appointments) || 0,
-        upcomingAppointments: Number.parseInt(stats.upcoming_appointments) || 0,
-        completedAppointments: Number.parseInt(stats.completed_appointments) || 0,
-        cancelledAppointments: Number.parseInt(stats.cancelled_appointments) || 0,
-        bookedAppointments: Number.parseInt(stats.booked_appointments) || 0,
-        inProgressAppointments: Number.parseInt(stats.in_progress_appointments) || 0,
-        telemedicineAppointments: Number.parseInt(stats.telemedicine_appointments) || 0,
-        inPersonAppointments: Number.parseInt(stats.in_person_appointments) || 0,
+        totalStaff: totalStaff,
+        totalRevenue: totalRevenue,
+        totalPatients: Number.parseInt(appointmentStats.total_patients) || 0,
+        totalAppointments: Number.parseInt(appointmentStats.total_appointments) || 0,
+        todayAppointments: Number.parseInt(appointmentStats.today_appointments) || 0,
+        upcomingAppointments: Number.parseInt(appointmentStats.upcoming_appointments) || 0,
+        completedAppointments: Number.parseInt(appointmentStats.completed_appointments) || 0,
+        cancelledAppointments: Number.parseInt(appointmentStats.cancelled_appointments) || 0,
+        bookedAppointments: Number.parseInt(appointmentStats.booked_appointments) || 0,
+        inProgressAppointments: Number.parseInt(appointmentStats.in_progress_appointments) || 0,
+        telemedicineAppointments: Number.parseInt(appointmentStats.telemedicine_appointments) || 0,
+        inPersonAppointments: Number.parseInt(appointmentStats.in_person_appointments) || 0,
         monthlyStats: monthlyResult.rows.map((row) => ({
           month: row.month,
           appointments: Number.parseInt(row.appointments) || 0,
@@ -986,7 +1007,7 @@ const AppointmentController = {
         })),
       }
 
-      logger.info(`Successfully retrieved stats for clinic ${clinicId}: ${stats.total_appointments} appointments`)
+      logger.info(`Successfully retrieved stats for clinic ${clinicId}: ${appointmentStats.total_appointments} appointments`)
       res.status(200).json({ success: true, data: responseData })
     } catch (error) {
       logger.error(`Get clinic stats by ID error: ${error.message}`)

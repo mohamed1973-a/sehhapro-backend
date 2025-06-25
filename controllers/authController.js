@@ -158,6 +158,7 @@ class AuthController {
   static getCurrentUser = asyncHandler(async (req, res) => {
     try {
       const userId = req.user.userId || req.user.id
+      logger.info(`[getCurrentUser] userId: ${userId}`)
 
       // Get complete user information with proper role join
       const result = await pool.query(
@@ -169,6 +170,7 @@ class AuthController {
       )
 
       if (result.rows.length === 0) {
+        logger.error(`[getCurrentUser] No user found for userId: ${userId}`)
         return res.status(404).json({
           success: false,
           message: "User not found",
@@ -176,6 +178,21 @@ class AuthController {
       }
 
       const user = result.rows[0]
+      logger.info(`[getCurrentUser] user.role: ${user.role}`)
+      let clinic_id = null
+      if (user.role === 'clinic_admin') {
+        // Get the primary clinic for this admin
+        const clinicResult = await pool.query(
+          "SELECT clinic_id FROM admin_clinics WHERE admin_id = $1 AND is_primary = TRUE",
+          [user.id]
+        )
+        logger.info(`[getCurrentUser] admin_clinics result for admin_id ${user.id}:`, clinicResult.rows)
+        if (clinicResult.rows.length > 0) {
+          clinic_id = clinicResult.rows[0].clinic_id
+        } else {
+          logger.warn(`[getCurrentUser] No primary clinic found for admin_id: ${user.id}`)
+        }
+      }
 
       res.json({
         success: true,
@@ -186,6 +203,7 @@ class AuthController {
           role: user.role,
           phone: user.phone,
           created_at: user.created_at,
+          clinic_id, // Add this for clinic_admins (null for others)
         },
       })
     } catch (error) {

@@ -4,6 +4,7 @@ const logger = require("../middleware/logger")
 const NotificationController = require("../controllers/notificationController")
 const { executeQuery } = require("../utils/dbUtils")
 const asyncHandler = require("../utils/asyncHandler")
+const { generateMeetingUrl } = require("../utils/jitsi")
 
 class TelemedicineController {
   /**
@@ -173,8 +174,32 @@ class TelemedicineController {
       const timeDiff = scheduledTime.getTime() - now.getTime()
       const minutesUntilAppointment = Math.floor(timeDiff / (1000 * 60))
 
-      session.canStart = session.status === "scheduled" && scheduledTime <= new Date(now.getTime() + 15 * 60 * 1000)
-      session.canJoin = session.status === "in-progress"
+      // More flexible timing validation
+      const fifteenMinutesBefore = new Date(scheduledTime.getTime() - 15 * 60 * 1000)
+      const twoHoursAfter = new Date(scheduledTime.getTime() + 2 * 60 * 60 * 1000)
+
+      // Determine if session can be started/joined based on status and timing
+      let canStart = false
+      let canJoin = false
+
+      if (session.status === "in-progress") {
+        canJoin = true
+        canStart = false // Already started
+      } else if (session.status === "completed" || session.status === "cancelled") {
+        canStart = false
+        canJoin = false
+      } else if (session.status === "scheduled") {
+        // Allow starting/joining if within the flexible time window
+        canStart = now >= fifteenMinutesBefore && now <= twoHoursAfter
+        canJoin = session.status === "in-progress"
+      } else {
+        // For any other status, allow joining
+        canJoin = session.status === "in-progress"
+        canStart = false
+      }
+
+      session.canStart = canStart
+      session.canJoin = canJoin
       session.formattedDate = scheduledTime.toLocaleDateString()
       session.formattedTime = scheduledTime.toLocaleTimeString([], {
         hour: "2-digit",
@@ -186,8 +211,8 @@ class TelemedicineController {
       session.currentTime = now.toISOString()
       session.timeDiff = timeDiff
       session.minutesUntilAppointment = minutesUntilAppointment
-      session.isExpired = timeDiff < 0
-      session.isTooEarly = timeDiff > 15 * 60 * 1000 // More than 15 minutes early
+      session.isExpired = now > twoHoursAfter // Only expired if more than 2 hours after
+      session.isTooEarly = now < fifteenMinutesBefore
 
       res.status(200).json(session)
     } catch (err) {
@@ -279,131 +304,87 @@ class TelemedicineController {
   }
 
   /**
-   * Start telemedicine session
+   * Start a telemedicine session.
+   * This is typically called by the doctor.
+   * It generates the meeting URL and moves the status to 'in-progress'.
    */
   static async start(req, res) {
     try {
       const { id } = req.params
+      const userId = req.user.id
+      const userRole = req.user.role
 
-      if (!req.user || !req.user.id) {
-        return res.status(401).json({ error: "Unauthorized" })
-      }
-
-      // Get session details
+      // 1. Fetch the session and verify permissions
       const sessionResult = await executeQuery(
-        `SELECT ts.*, a.status as appointment_status 
-         FROM telemedicine_sessions ts 
-         JOIN appointments a ON ts.appointment_id = a.id 
-         WHERE ts.id = $1 AND (ts.patient_id = $2 OR ts.doctor_id = $2)`,
-        [id, req.user.id],
+        `SELECT ts.*, a.doctor_id, a.patient_id 
+         FROM telemedicine_sessions ts
+         JOIN appointments a ON ts.appointment_id = a.id
+         WHERE ts.id = $1`,
+        [id],
       )
 
       if (sessionResult.rows.length === 0) {
-        return res.status(404).json({ 
-          error: "Session not found or unauthorized",
-          message: "Telemedicine session not found"
-        })
+        return res.status(404).json({ message: "Telemedicine session not found." })
       }
 
       const session = sessionResult.rows[0]
 
-      if (session.status !== "scheduled") {
-        return res.status(400).json({ 
-          error: "Session must be in 'scheduled' status to start",
-          message: "Invalid session status"
-        })
+      // Only the assigned doctor can start the session
+      if (userRole !== "doctor" || session.doctor_id !== userId) {
+        return res.status(403).json({ message: "You are not authorized to start this session." })
       }
 
-      // Check if session can be started (15 minutes before scheduled time)
-      const scheduledTime = new Date(session.scheduled_time || session.appointment_time)
-      const now = new Date()
-      const timeDiff = scheduledTime.getTime() - now.getTime()
-      const minutesUntilAppointment = Math.floor(timeDiff / (1000 * 60))
-      const canStart = scheduledTime <= new Date(now.getTime() + 15 * 60 * 1000)
-
-      if (!canStart) {
-        if (timeDiff > 0) {
-          // Session is in the future
-          if (minutesUntilAppointment > 15) {
-        return res.status(400).json({
-              error: `Session can only be started 15 minutes before scheduled time. Please wait ${minutesUntilAppointment - 15} more minutes.`,
-              message: "Session not yet available",
-          scheduledTime: scheduledTime.toISOString(),
-          currentTime: now.toISOString(),
-              minutesUntilAvailable: minutesUntilAppointment - 15,
-              appointmentTime: scheduledTime.toISOString()
-            })
-          } else {
-            return res.status(400).json({
-              error: `Session will be available in ${minutesUntilAppointment} minutes. Please wait a bit longer.`,
-              message: "Session starting soon",
-              scheduledTime: scheduledTime.toISOString(),
-              currentTime: now.toISOString(),
-              minutesUntilAvailable: minutesUntilAppointment,
-              appointmentTime: scheduledTime.toISOString()
-            })
-          }
-        } else {
-          // Session is in the past
-          return res.status(410).json({
-            error: "This telemedicine session has already passed. Please contact your healthcare provider to reschedule.",
-            message: "Session has expired",
-            scheduledTime: scheduledTime.toISOString(),
-            currentTime: now.toISOString(),
-            isExpired: true
+      // 2. Check session status
+      if (session.status !== "scheduled") {
+        // If already in-progress, return existing URL
+        if (session.status === "in-progress" && session.session_url) {
+          return res.status(200).json({
+            message: "Session already in progress.",
+            meetingUrl: session.session_url,
+            session,
           })
         }
+        return res.status(400).json({ message: `Cannot start a session with status: ${session.status}` })
       }
 
-      // Generate session URL and meeting ID if not exists
-      const meetingId = session.meeting_id || `meeting_${id}_${Date.now()}`
-      const sessionUrl =
-        session.session_url || `${process.env.FRONTEND_URL}/telemedicine/session/${id}?meeting=${meetingId}`
+      // 3. Generate Jitsi meeting URL
+      const meetingUrl = generateMeetingUrl()
 
-      // Update session
-      await executeQuery(
+      // 4. Update the session in the database
+      const updateResult = await executeQuery(
         `UPDATE telemedicine_sessions 
-         SET status = 'in-progress', start_time = NOW(), meeting_id = $1, session_url = $2 
-         WHERE id = $3`,
-        [meetingId, sessionUrl, id],
+         SET status = 'in-progress', session_url = $1, start_time = NOW(), updated_at = NOW() 
+         WHERE id = $2
+         RETURNING *`,
+        [meetingUrl, id],
       )
 
-      // Update appointment status
-      await executeQuery("UPDATE appointments SET status = 'in-progress' WHERE id = $1", [session.appointment_id])
+      const updatedSession = updateResult.rows[0]
 
-      // Notify the other party
-      const notifyUserId = req.user.id === session.patient_id ? session.doctor_id : session.patient_id
-      try {
-        await NotificationController.createNotification({
-          userId: notifyUserId,
-          message: `Telemedicine session #${id} has started`,
-          type: "session_started",
-          priority: "high",
-          refId: id,
-        })
-      } catch (notifyError) {
-        logger.error(`Failed to send session start notification: ${notifyError.message}`)
-      }
+      // 5. Send notifications (optional but recommended)
+      // Notify patient that the doctor has started the session
+      await NotificationController.createNotification({
+        userId: session.patient_id,
+        message: `Your telemedicine session with Dr. ${req.user.full_name} has started.`,
+        type: "session_started",
+        priority: "high",
+        refId: updatedSession.id,
+      })
 
+      // 6. Return the meeting URL to the frontend
       res.status(200).json({
-        message: "Session started successfully",
-        sessionId: id,
-        meetingId,
-        sessionUrl,
-        session: {
-          id: session.id,
-          status: "in-progress",
-          appointmentId: session.appointment_id,
-        },
+        message: "Telemedicine session started successfully.",
+        meetingUrl: meetingUrl,
+        session: updatedSession,
       })
     } catch (err) {
       logger.error(`Start telemedicine session error: ${err.message}`)
-      res.status(500).json({ error: "Server error", details: err.message })
+      res.status(500).json({ message: "Failed to start telemedicine session.", details: err.message })
     }
   }
 
   /**
-   * End telemedicine session
+   * End a telemedicine session.
    */
   static async end(req, res) {
     try {
@@ -477,54 +458,61 @@ class TelemedicineController {
   }
 
   /**
-   * Join telemedicine session
+   * Join a telemedicine session.
+   * This is used by both doctor and patient after the session has been started.
    */
   static async join(req, res) {
     try {
       const { id } = req.params
+      const userId = req.user.id
+      const userRole = req.user.role
 
-      if (!req.user || !req.user.id) {
-        return res.status(401).json({ error: "Unauthorized" })
-      }
-
-      // Get session details
-      const result = await executeQuery(
-        `SELECT ts.*, a.status as appointment_status 
-         FROM telemedicine_sessions ts 
-         JOIN appointments a ON ts.appointment_id = a.id 
-         WHERE ts.id = $1 AND (ts.patient_id = $2 OR ts.doctor_id = $2)`,
-        [id, req.user.id],
+      // 1. Fetch the session
+      const sessionResult = await executeQuery(
+        `SELECT ts.*, a.doctor_id, a.patient_id
+         FROM telemedicine_sessions ts
+         JOIN appointments a ON ts.appointment_id = a.id
+         WHERE ts.id = $1`,
+        [id],
       )
 
-      if (result.rows.length === 0) {
-        return res.status(404).json({ error: "Session not found or unauthorized" })
+      if (sessionResult.rows.length === 0) {
+        return res.status(404).json({ message: "Telemedicine session not found." })
       }
 
-      const session = result.rows[0]
+      const session = sessionResult.rows[0]
 
+      // 2. Verify permissions
+      const isDoctor = userRole === "doctor" && session.doctor_id === userId
+      const isPatient = userRole === "patient" && session.patient_id === userId
+
+      if (!isDoctor && !isPatient) {
+        return res.status(403).json({ message: "You are not authorized to join this session." })
+      }
+
+      // 3. Check session status and URL
       if (session.status !== "in-progress") {
-        return res.status(400).json({ error: "Session is not currently active" })
+        return res.status(400).json({ message: "This session is not active. It cannot be joined." })
       }
 
+      if (!session.session_url) {
+        return res.status(404).json({ message: "Meeting URL not found for this session. The session may not have been started correctly." })
+      }
+
+      // 4. Return the meeting URL
       res.status(200).json({
-        message: "Joined session successfully",
-        sessionId: id,
-        meetingId: session.meeting_id,
-        sessionUrl: session.session_url,
-        session: {
-          id: session.id,
-          status: session.status,
-          appointmentId: session.appointment_id,
-        },
+        message: "Successfully retrieved session details.",
+        meetingUrl: session.session_url,
+        session,
       })
     } catch (err) {
       logger.error(`Join telemedicine session error: ${err.message}`)
-      res.status(500).json({ error: "Server error", details: err.message })
+      res.status(500).json({ message: "Failed to join telemedicine session.", details: err.message })
     }
   }
 
   /**
-   * Leave telemedicine session
+   * Leave a telemedicine session (placeholder).
    */
   static async leave(req, res) {
     try {
@@ -1371,22 +1359,43 @@ class TelemedicineController {
 
       const session = result.rows[0]
 
-      // Check timing validation
+      // Check timing validation with more flexible logic
       const appointmentTime = new Date(session.appointment_time || session.scheduled_time)
       const now = new Date()
       const fifteenMinutesBefore = new Date(appointmentTime.getTime() - 15 * 60 * 1000)
-      const thirtyMinutesAfter = new Date(appointmentTime.getTime() + 30 * 60 * 1000)
+      const twoHoursAfter = new Date(appointmentTime.getTime() + 2 * 60 * 60 * 1000) // 2 hours after appointment
 
-      // Determine if session can be joined
+      // Determine if session can be joined based on status and timing
       let canJoin = false
       let joinMessage = ""
 
-      if (now < fifteenMinutesBefore) {
-        const minutesUntilJoin = Math.floor((fifteenMinutesBefore.getTime() - now.getTime()) / (1000 * 60))
-        joinMessage = `Session will be available in ${minutesUntilJoin} minutes`
-      } else if (now > thirtyMinutesAfter) {
-        joinMessage = "Session has already passed"
-      } else {
+      // If session is already in progress, allow joining regardless of time
+      if (session.status === "in-progress") {
+        canJoin = true
+        joinMessage = "Session is in progress - you can join now"
+      }
+      // If session is completed or cancelled, don't allow joining
+      else if (session.status === "completed" || session.status === "cancelled") {
+        canJoin = false
+        joinMessage = `Session has been ${session.status}`
+      }
+      // For scheduled sessions, check timing
+      else if (session.status === "scheduled") {
+        if (now < fifteenMinutesBefore) {
+          const minutesUntilJoin = Math.floor((fifteenMinutesBefore.getTime() - now.getTime()) / (1000 * 60))
+          joinMessage = `Session will be available in ${minutesUntilJoin} minutes`
+        } else if (now > twoHoursAfter) {
+          // Only mark as passed if it's been more than 2 hours since the appointment
+          canJoin = false
+          joinMessage = "Session has already passed"
+        } else {
+          // Within the valid time window (15 min before to 2 hours after)
+          canJoin = true
+          joinMessage = "Session is available"
+        }
+      }
+      // For any other status, allow joining
+      else {
         canJoin = true
         joinMessage = "Session is available"
       }
@@ -1416,7 +1425,7 @@ class TelemedicineController {
             appointment_time: appointmentTime.toISOString(),
             current_time: now.toISOString(),
             earliest_join_time: fifteenMinutesBefore.toISOString(),
-            latest_join_time: thirtyMinutesAfter.toISOString()
+            latest_join_time: twoHoursAfter.toISOString()
           }
         }
       })
