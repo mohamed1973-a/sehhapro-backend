@@ -78,6 +78,13 @@ router.get(
   AppointmentController.getClinicStatsByClinicId,
 )
 
+// Add clinic stats route for dashboard
+router.get(
+  "/:id/stats",
+  role(["clinic_admin", "platform_admin"]),
+  AppointmentController.getClinicStatsByClinicId,
+)
+
 // Staff association routes
 router.post("/:clinicId/doctors", role(["platform_admin", "clinic_admin"]), ClinicController.addDoctor)
 router.post("/:clinicId/nurses", role(["platform_admin", "clinic_admin"]), ClinicController.addNurse)
