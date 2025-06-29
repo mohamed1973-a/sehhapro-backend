@@ -416,7 +416,7 @@ router.get(
         CONCAT('Lab Result: ', lr.test_type) as title,
         lres.results as content,
         'completed' as status,
-        CONCAT('Lab Tech: ', tech.full_name) as created_by,
+        CONCAT('Dr. ', doc.full_name) as created_by,
         lres.status as appointment_type,
         NULL as clinic_name
       FROM lab_results lres
@@ -643,5 +643,327 @@ router.post(
 // Add this route handler for medical profiles
 router.get("/:id/medical-profile", protect, PatientMedicalProfileController.getMedicalProfile)
 router.put("/:id/medical-profile", protect, PatientMedicalProfileController.updateMedicalProfile)
+
+// Add missing medical record endpoints
+router.get("/:id/medical-record", protect, async (req, res) => {
+  try {
+    const patientId = req.params.id;
+    const userId = req.user.id;
+    const userRole = req.user.role;
+
+    // Check permissions - patients can only view their own records
+    if (userRole === "patient" && Number.parseInt(patientId) !== userId) {
+      return res.status(403).json({
+        success: false,
+        error: "Access denied. You can only view your own medical records."
+      });
+    }
+
+    // For doctors, check if they have a relationship with this patient
+    if (userRole === "doctor") {
+      const hasRelationship = await executeQuery(
+        "SELECT 1 FROM appointments WHERE doctor_id = $1 AND patient_id = $2 LIMIT 1",
+        [userId, patientId]
+      );
+
+      if (hasRelationship.rows.length === 0) {
+        return res.status(403).json({
+          success: false,
+          error: "Access denied. You don't have a relationship with this patient."
+        });
+      }
+    }
+
+    // Get all medical records for the patient
+    const recordsQuery = await executeQuery(
+      `SELECT * FROM medical_records WHERE patient_id = $1 ORDER BY created_at DESC`,
+      [patientId]
+    );
+
+    res.status(200).json({
+      success: true,
+      data: recordsQuery.rows
+    });
+  } catch (error) {
+    logger.error(`Get patient medical record error: ${error.message}`);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch patient medical record",
+      details: error.message
+    });
+  }
+});
+
+router.get("/:id/medical-record/notes", protect, async (req, res) => {
+  try {
+    const patientId = req.params.id;
+    const userId = req.user.id;
+    const userRole = req.user.role;
+
+    // Check permissions - patients can only view their own records
+    if (userRole === "patient" && Number.parseInt(patientId) !== userId) {
+      return res.status(403).json({
+        success: false,
+        error: "Access denied. You can only view your own medical records."
+      });
+    }
+
+    // Get all notes from medical records for the patient
+    const notesQuery = await executeQuery(
+      `SELECT id, patient_id, doctor_id, clinic_id, appointment_id, notes, created_at, updated_at
+       FROM medical_records 
+       WHERE patient_id = $1 AND notes IS NOT NULL
+       ORDER BY created_at DESC`,
+      [patientId]
+    );
+
+    res.status(200).json({
+      success: true,
+      data: notesQuery.rows
+    });
+  } catch (error) {
+    logger.error(`Get patient medical notes error: ${error.message}`);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch patient medical notes",
+      details: error.message
+    });
+  }
+});
+
+router.post("/:id/medical-record/notes", protect, role(["doctor", "nurse"]), async (req, res) => {
+  try {
+    const patientId = req.params.id;
+    const { notes, appointmentId } = req.body;
+    const doctorId = req.user.id;
+
+    // Validate input
+    if (!notes) {
+      return res.status(400).json({
+        success: false,
+        error: "Notes are required"
+      });
+    }
+
+    // Insert note as a medical record
+    const insertQuery = await executeQuery(
+      `INSERT INTO medical_records (patient_id, doctor_id, appointment_id, notes, entry_type)
+       VALUES ($1, $2, $3, $4, 'note')
+       RETURNING *`,
+      [patientId, doctorId, appointmentId || null, notes]
+    );
+
+    res.status(201).json({
+      success: true,
+      data: insertQuery.rows[0],
+      message: "Medical note added successfully"
+    });
+  } catch (error) {
+    logger.error(`Add patient medical note error: ${error.message}`);
+    res.status(500).json({
+      success: false,
+      error: "Failed to add patient medical note",
+      details: error.message
+    });
+  }
+});
+
+router.get("/:id/medical-record/prescriptions", protect, async (req, res) => {
+  try {
+    const patientId = req.params.id;
+    const userId = req.user.id;
+    const userRole = req.user.role;
+
+    // Check permissions - patients can only view their own records
+    if (userRole === "patient" && Number.parseInt(patientId) !== userId) {
+      return res.status(403).json({
+        success: false,
+        error: "Access denied. You can only view your own prescriptions."
+      });
+    }
+
+    // Get all prescriptions for the patient
+    const prescriptionsQuery = await executeQuery(
+      `SELECT p.*, u.full_name as doctor_name
+       FROM prescriptions p
+       JOIN users u ON p.doctor_id = u.id
+       WHERE p.patient_id = $1
+       ORDER BY p.created_at DESC`,
+      [patientId]
+    );
+
+    res.status(200).json({
+      success: true,
+      data: prescriptionsQuery.rows
+    });
+  } catch (error) {
+    logger.error(`Get patient prescriptions error: ${error.message}`);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch patient prescriptions",
+      details: error.message
+    });
+  }
+});
+
+router.get("/:id/medical-record/lab-imaging", protect, async (req, res) => {
+  try {
+    const patientId = req.params.id;
+    const userId = req.user.id;
+    const userRole = req.user.role;
+
+    // Check permissions - patients can only view their own records
+    if (userRole === "patient" && Number.parseInt(patientId) !== userId) {
+      return res.status(403).json({
+        success: false,
+        error: "Access denied. You can only view your own lab results."
+      });
+    }
+
+    // First check if the lab_requests table exists
+    const tableCheck = await executeQuery(
+      `SELECT EXISTS (
+         SELECT FROM information_schema.tables 
+         WHERE table_schema = 'public'
+         AND table_name = 'lab_requests'
+       ) as exists`
+    );
+    
+    if (!tableCheck.rows[0].exists) {
+      // Table doesn't exist, return empty data
+      return res.status(200).json({
+        success: true,
+        data: []
+      });
+    }
+
+    // Get all lab requests and results for the patient with safer joins
+    try {
+    const labQuery = await executeQuery(
+      `SELECT 
+         lr.id as request_id, 
+         lr.patient_id,
+         lr.doctor_id,
+         lr.test_type,
+           lr.test_name,
+         lr.urgency,
+           lr.notes as clinical_notes,
+         lr.status as request_status,
+         lr.created_at,
+         lr.updated_at,
+           COALESCE(lres.id, 0) as result_id, 
+           COALESCE(lres.results, '{}') as results, 
+           COALESCE(lres.status, 'pending') as result_status,
+         lres.created_at as result_date, 
+           u.full_name as doctor_name,
+           c.name as lab_name
+       FROM lab_requests lr
+       LEFT JOIN users u ON lr.doctor_id = u.id
+         LEFT JOIN clinics c ON lr.lab_clinic_id = c.id
+       LEFT JOIN lab_results lres ON lr.id = lres.lab_request_id
+       WHERE lr.patient_id = $1
+       ORDER BY lr.created_at DESC`,
+      [patientId]
+    );
+
+      // Process the results to ensure proper JSON parsing
+      const processedResults = labQuery.rows.map(row => {
+        try {
+          // Parse results if it's a string
+          if (row.results && typeof row.results === 'string') {
+            row.results = JSON.parse(row.results);
+          }
+        } catch (e) {
+          // If parsing fails, set to empty object
+          row.results = {};
+          console.error(`Failed to parse results for request ${row.request_id}: ${e.message}`);
+        }
+        return row;
+      });
+
+      return res.status(200).json({
+      success: true,
+        data: processedResults
+      });
+    } catch (queryError) {
+      logger.error(`Lab query error: ${queryError.message}`);
+      // Return empty data on query error rather than failing
+      return res.status(200).json({
+        success: true,
+        data: [],
+        warning: "Error querying lab data"
+    });
+    }
+  } catch (error) {
+    logger.error(`Get patient lab results error: ${error.message}`);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch patient lab results",
+      details: error.message
+    });
+  }
+});
+
+// Get patient by ID
+router.get("/:id", protect, async (req, res) => {
+  try {
+    const patientId = req.params.id
+    const userId = req.user.id
+    const userRole = req.user.role
+
+    // Verify doctor has access to this patient
+    if (userRole === "doctor") {
+      const hasAccess = await executeQuery(
+        `SELECT 1 FROM appointments 
+         WHERE doctor_id = $1 AND patient_id = $2 LIMIT 1`,
+        [userId, patientId]
+      )
+      if (hasAccess.rows.length === 0) {
+        return res.status(403).json({ error: "Access denied" })
+      }
+    } else if (userRole !== "clinic_admin" && userRole !== "platform_admin") {
+      return res.status(403).json({ error: "Access denied" })
+    }
+
+    // Get patient basic info - corrected to match actual schema
+    const patientQuery = `
+      SELECT 
+        u.id, u.full_name, u.email, u.phone, 
+        pmp.date_of_birth, pmp.gender, u.created_at,
+        pmp.blood_type, pmp.allergies, pmp.emergency_contact_name,
+        pmp.emergency_contact_phone, pmp.insurance_provider,
+        pmp.insurance_policy_number
+       FROM users u
+       LEFT JOIN patient_medical_profiles pmp ON u.id = pmp.patient_id
+      WHERE u.id = $1 AND u.role_id = (SELECT id FROM roles WHERE name = 'patient')
+    `
+
+    const result = await executeQuery(patientQuery, [patientId])
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Patient not found" })
+    }
+
+    const patient = result.rows[0]
+
+    // Parse JSON fields
+    if (patient.allergies && typeof patient.allergies === "string") {
+      patient.allergies = JSON.parse(patient.allergies)
+    }
+
+    res.status(200).json({
+      success: true,
+      data: patient
+    })
+
+  } catch (error) {
+    logger.error(`Get patient by ID error: ${error.message}`)
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch patient data",
+      details: error.message
+    })
+  }
+})
 
 module.exports = router

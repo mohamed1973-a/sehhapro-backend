@@ -1,6 +1,7 @@
 const { pool } = require("../config/database")
 const logger = require("../middleware/logger")
 const { executeQuery } = require("../utils/dbUtils")
+const PaymentService = require("../services/paymentService")
 
 // Helper function to parse date strings without timezone conversion
 function parseLocalDateString(dateTimeString) {
@@ -248,7 +249,17 @@ const AppointmentController = {
   // Create a new appointment
   async create(req, res) {
     try {
-      const { doctorId, clinicId, date, reason, type, specialty, duration = 30 } = req.body
+      const { 
+        doctorId, 
+        clinicId, 
+        date, 
+        reason, 
+        type, 
+        specialty, 
+        duration = 30,
+        paymentMethod = 'balance',
+        appointmentFee = 0
+      } = req.body
       const userRole = req.user.role
       const userId = req.user.id
 
@@ -261,6 +272,8 @@ const AppointmentController = {
         patientId: req.body.patientId,
         specialty,
         duration,
+        paymentMethod,
+        appointmentFee,
         userRole,
         userId,
       })
@@ -452,6 +465,56 @@ const AppointmentController = {
       const appointment = result.rows[0]
 
       console.log("Created appointment:", appointment.id)
+
+      // Debug log for transaction
+      console.log("=== PAYMENT DEBUG ===")
+      console.log("Transaction object:", req.dbTransaction ? "Present" : "Missing")
+      console.log("Transaction client:", req.dbTransaction?.client ? "Present" : "Missing")
+      console.log("Transaction methods:", Object.keys(req.dbTransaction || {}))
+      console.log("Payment method:", paymentMethod)
+      console.log("Appointment fee:", appointmentFee)
+
+      // Validate paymentMethod and appointmentFee before processing payment
+      let paymentResult = null
+      // Check if we need to process payment - either explicit fee or default fee
+      const effectiveAppointmentFee = appointmentFee || 1000; // Default to 1000 if not specified
+      const effectivePaymentMethod = paymentMethod || 'balance'; // Default to balance if not specified
+
+      console.log("Effective appointment fee:", effectiveAppointmentFee)
+      console.log("Effective payment method:", effectivePaymentMethod)
+
+      // Always process payment unless explicitly set to zero
+      if (effectiveAppointmentFee > 0) {
+        try {
+          paymentResult = await PaymentService.processAppointmentPayment({
+            appointmentId: appointment.id,
+            patientId,
+            doctorId,
+            appointmentType: type,
+            paymentMethod: effectivePaymentMethod,
+            amount: effectiveAppointmentFee,
+            dbTransaction: req.dbTransaction
+          })
+          console.log("Payment processed:", paymentResult)
+        } catch (paymentError) {
+          console.error("Payment processing failed:", paymentError.message)
+          // Log error but do not rollback entire transaction to avoid silent failure
+          logger.error(`Payment processing failed for appointment ${appointment.id}: ${paymentError.message}`)
+          // Optionally, set paymentResult to indicate failure
+          paymentResult = {
+            success: false,
+            error: paymentError.message,
+            code: "PAYMENT_FAILED"
+          }
+          // Do not return here, continue to commit transaction and respond with warning
+        }
+      } else {
+        console.log("Skipping payment processing - zero fee appointment")
+      }
+
+      // After payment processing
+      console.log("=== END PAYMENT DEBUG ===")
+      console.log("Payment result:", paymentResult)
 
       // Create telemedicine session if needed
       if (type === "telemedicine") {
@@ -1153,10 +1216,33 @@ const AppointmentController = {
         appointmentId,
       ])
 
+      // Process completion payment
+      let completionPaymentResult = null
+      try {
+        completionPaymentResult = await PaymentService.processCompletionPayment({
+          appointmentId,
+          patientId: appointment.patient_id,
+          doctorId: appointment.doctor_id,
+          appointmentType: appointment.type,
+          dbTransaction: req.dbTransaction
+        })
+        
+        console.log("Completion payment processed:", completionPaymentResult)
+      } catch (paymentError) {
+        console.error("Completion payment processing failed:", paymentError.message)
+        // Don't fail the session end if payment fails, just log it
+        logger.error(`Completion payment error for appointment ${appointmentId}: ${paymentError.message}`)
+      }
+
       // Commit the transaction
       await req.dbTransaction.commit()
 
-      res.status(200).json({ success: true, message: "Telemedicine session ended" })
+      res.status(200).json({ 
+        success: true, 
+        message: "Telemedicine session ended",
+        paymentProcessed: completionPaymentResult?.paymentProcessed || false,
+        paymentMessage: completionPaymentResult?.message
+      })
     } catch (error) {
       // Rollback transaction on error
       if (req.dbTransaction) {
@@ -1234,6 +1320,8 @@ const AppointmentController = {
         return res.status(404).json({ error: "Appointment not found or access denied" })
       }
 
+      const appointment = result.rows[0]
+
       // Update appointment with check-out time
       const updateQuery = `
         UPDATE appointments 
@@ -1242,10 +1330,33 @@ const AppointmentController = {
       `
       await req.dbTransaction.query(updateQuery, ["completed", notes, appointmentId])
 
+      // Process completion payment
+      let completionPaymentResult = null
+      try {
+        completionPaymentResult = await PaymentService.processCompletionPayment({
+          appointmentId,
+          patientId: appointment.patient_id,
+          doctorId: appointment.doctor_id,
+          appointmentType: appointment.type,
+          dbTransaction: req.dbTransaction
+        })
+        
+        console.log("Completion payment processed:", completionPaymentResult)
+      } catch (paymentError) {
+        console.error("Completion payment processing failed:", paymentError.message)
+        // Don't fail the checkout if payment fails, just log it
+        logger.error(`Completion payment error for appointment ${appointmentId}: ${paymentError.message}`)
+      }
+
       // Commit the transaction
       await req.dbTransaction.commit()
 
-      res.status(200).json({ success: true, message: "Checked out successfully" })
+      res.status(200).json({ 
+        success: true, 
+        message: "Checked out successfully",
+        paymentProcessed: completionPaymentResult?.paymentProcessed || false,
+        paymentMessage: completionPaymentResult?.message
+      })
     } catch (error) {
       // Rollback transaction on error
       if (req.dbTransaction) {
@@ -1260,60 +1371,71 @@ const AppointmentController = {
   async cancel(req, res) {
     try {
       const appointmentId = req.params.id
+      const { reason = "Cancelled by user" } = req.body
       const userId = req.user.id
       const userRole = req.user.role
 
-      // Verify appointment exists and user has access
-      let query = "SELECT * FROM appointments WHERE id = $1"
-      const params = [appointmentId]
+      // Check if appointment exists and user has access
+      const appointmentQuery = `
+        SELECT a.*, s.start_time, s.end_time
+        FROM appointments a 
+        LEFT JOIN availability_slots s ON a.slot_id = s.id 
+        WHERE a.id = $1
+      `
+      const appointmentResult = await req.dbTransaction.query(appointmentQuery, [appointmentId])
 
-      if (userRole === "patient") {
-        query += " AND patient_id = $2"
-        params.push(userId)
-      } else if (userRole === "doctor") {
-        query += " AND doctor_id = $2"
-        params.push(userId)
-      }
-
-      const result = await req.dbTransaction.query(query, params)
-
-      if (result.rows.length === 0) {
+      if (appointmentResult.rows.length === 0) {
         await req.dbTransaction.rollback()
-        return res.status(404).json({ error: "Appointment not found or access denied" })
+        return res.status(404).json({ error: "Appointment not found" })
       }
 
-      const appointment = result.rows[0]
+      const appointment = appointmentResult.rows[0]
+
+      // Check permissions
+      if (userRole === "patient" && appointment.patient_id !== userId) {
+        await req.dbTransaction.rollback()
+        return res.status(403).json({ error: "Access denied - you can only cancel your own appointments" })
+      }
+
+      if (userRole === "doctor" && appointment.doctor_id !== userId) {
+        await req.dbTransaction.rollback()
+        return res.status(403).json({ error: "Access denied - you can only cancel your own appointments" })
+      }
 
       // Update appointment status
-      await req.dbTransaction.query("UPDATE appointments SET status = $1, updated_at = NOW() WHERE id = $2", [
-        "cancelled",
-        appointmentId,
-      ])
+      await req.dbTransaction.query("UPDATE appointments SET status = $1 WHERE id = $2", ["cancelled", appointmentId])
 
-      // Make the slot available again if it exists
+      // Make slot available again if it exists
       if (appointment.slot_id) {
-        console.log("=== SLOT CANCELLATION DEBUG ===")
-        console.log("Making slot available due to cancellation:", appointment.slot_id)
-
-        const cancelUpdateResult = await req.dbTransaction.query(
-          "UPDATE availability_slots SET is_available = TRUE WHERE id = $1 RETURNING id, is_available",
-          [appointment.slot_id],
-        )
-
-        console.log("Cancellation update result:", cancelUpdateResult.rows[0])
-        console.log("=== END SLOT CANCELLATION ===")
+        await req.dbTransaction.query("UPDATE availability_slots SET is_available = TRUE WHERE id = $1", [appointment.slot_id])
       }
 
-      // Cancel telemedicine session if exists
-      await req.dbTransaction.query("UPDATE telemedicine_sessions SET status = $1 WHERE appointment_id = $2", [
-        "cancelled",
+      // Process refund if payment was made
+      let refundResult = null
+      try {
+        refundResult = await PaymentService.processRefund({
         appointmentId,
-      ])
+          patientId: appointment.patient_id,
+          reason,
+          dbTransaction: req.dbTransaction
+        })
+        
+        console.log("Refund processed:", refundResult)
+      } catch (refundError) {
+        console.error("Refund processing failed:", refundError.message)
+        // Don't fail the cancellation if refund fails, just log it
+        logger.error(`Refund error for appointment ${appointmentId}: ${refundError.message}`)
+      }
 
       // Commit the transaction
       await req.dbTransaction.commit()
 
-      res.status(200).json({ success: true, message: "Appointment cancelled successfully" })
+      res.status(200).json({ 
+        success: true, 
+        message: "Appointment cancelled successfully",
+        refundProcessed: refundResult?.refundProcessed || false,
+        refundMessage: refundResult?.message
+      })
     } catch (error) {
       // Rollback transaction on error
       if (req.dbTransaction) {

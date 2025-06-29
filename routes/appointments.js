@@ -61,6 +61,8 @@ router.post(
     body("specialty").optional().isString().withMessage("Specialty must be a string"),
     body("duration").optional().isInt({ min: 15, max: 120 }).withMessage("Duration must be between 15 and 120 minutes"),
     body("patientId").optional().isInt().withMessage("Patient ID must be an integer"),
+    body("paymentMethod").optional().isIn(["balance", "cash"]).withMessage("Payment method must be 'balance' or 'cash'"),
+    body("appointmentFee").optional().isFloat({ min: 0 }).withMessage("Appointment fee must be a positive number"),
   ],
   validate,
   AppointmentController.create,

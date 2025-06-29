@@ -48,7 +48,13 @@ const beginTransaction = async (req, res, next) => {
           throw err
         }
       },
+      // Add a flag to identify this as a transaction wrapper
+      isTransactionWrapper: true,
+      // Add debugging info
+      transactionId: Date.now().toString(36) + Math.random().toString(36).substr(2, 5),
     }
+    
+    logger.info(`Transaction started with ID: ${req.dbTransaction.transactionId}`)
     next()
   } catch (err) {
     if (client) {

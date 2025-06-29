@@ -39,7 +39,7 @@ router.post(
     body("address").notEmpty().withMessage("Address is required"),
     body("phone").optional().isMobilePhone().withMessage("Invalid phone number"),
     body("email").optional().isEmail().withMessage("Invalid email address"),
-    body("type").optional().isIn(["parent", "child", "main", "lab"]).withMessage("Invalid clinic type"),
+    body("type").optional().isIn(["parent", "child", "main", "lab", "cabinet"]).withMessage("Invalid clinic type"),
   ],
   validate,
   ClinicController.createClinic,
@@ -56,7 +56,7 @@ router.put(
     body("name").optional().notEmpty().withMessage("Clinic name cannot be empty"),
     body("phone").optional().isMobilePhone().withMessage("Invalid phone number"),
     body("email").optional().isEmail().withMessage("Invalid email address"),
-    body("type").optional().isIn(["parent", "child", "main", "lab"]).withMessage("Invalid clinic type"),
+    body("type").optional().isIn(["parent", "child", "main", "lab", "cabinet"]).withMessage("Invalid clinic type"),
   ],
   validate,
   ClinicController.updateClinic,
@@ -67,6 +67,18 @@ router.delete("/:id", role(["platform_admin", "clinic_admin"]), ClinicController
 
 // Get clinic staff
 router.get("/:id/staff", role(["platform_admin", "clinic_admin", "lab_admin"]), ClinicController.getClinicStaff)
+
+// Get individual staff member details
+router.get("/:id/staff/:staffId", role(["platform_admin", "clinic_admin", "lab_admin"]), ClinicController.getStaffMember)
+
+// Update staff member status
+router.patch("/:id/staff/:staffId", role(["platform_admin", "clinic_admin"]), ClinicController.updateStaffStatus)
+
+// Get staff member schedule
+router.get("/:id/staff/:staffId/schedule", role(["platform_admin", "clinic_admin", "lab_admin"]), ClinicController.getStaffSchedule)
+
+// Update staff member schedule
+router.put("/:id/staff/:staffId/schedule", role(["platform_admin", "clinic_admin"]), ClinicController.updateStaffSchedule)
 
 // Remove staff member from clinic
 router.delete("/:id/staff/:staffId", role(["platform_admin", "clinic_admin"]), ClinicController.removeStaffMember)
@@ -215,4 +227,61 @@ router.get("/:id/activity", role(["platform_admin", "clinic_admin", "lab_admin"]
   }
 })
 
+// -------------------------------------------------
+// Clinic Settings (lightweight inline until controller added)
+
+// @route GET /api/clinics/:id/settings
+// @desc  Return merged clinic settings (general + operating hours) or sane defaults if missing tables
+// @access Private (clinic_admin, platform_admin)
+router.get(
+  "/:id/settings",
+  role(["platform_admin", "clinic_admin"]),
+  async (req, res) => {
+    const { id } = req.params
+    try {
+      // Fetch basic clinic info
+      const clinicRes = await pool.query("SELECT id, name, address, phone, email, description FROM clinics WHERE id = $1", [id])
+      if (!clinicRes.rows.length) {
+        return res.status(404).json({ success: false, error: "Clinic not found" })
+      }
+
+      const clinic = clinicRes.rows[0]
+
+      // Fetch operating hours if table exists
+      let operating_hours = []
+      try {
+        const hoursRes = await pool.query(
+          "SELECT day_of_week, open_time, close_time, is_closed FROM clinic_operating_hours WHERE clinic_id = $1",
+          [id],
+        )
+        operating_hours = hoursRes.rows
+      } catch (hoursErr) {
+        console.log("[Clinic Settings] operating hours table missing or error:", hoursErr.message)
+      }
+
+      const settings = {
+        name: clinic.name,
+        address: clinic.address,
+        phone: clinic.phone,
+        email: clinic.email,
+        description: clinic.description,
+        appointment_price: 0,
+        appointment_duration: 30,
+        max_advance_booking_days: 30,
+        email_notifications: true,
+        sms_notifications: true,
+        appointment_reminders: true,
+        reminder_hours_before: 24,
+        operating_hours,
+      }
+
+      return res.json({ success: true, data: settings })
+    } catch (err) {
+      console.error("[Clinic Settings] get error:", err.message)
+      return res.status(500).json({ success: false, error: "Server error", details: err.message })
+    }
+  },
+)
+
+// exports
 module.exports = router
