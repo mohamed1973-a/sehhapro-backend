@@ -91,7 +91,14 @@ class StaffSalaryController {
           u.email,
           r.name as position,
           u.employment_type,
-          NULL as monthly_salary,
+          COALESCE(u.base_salary, 
+            CASE 
+              WHEN r.name = 'doctor' THEN 50000
+              WHEN r.name = 'nurse' THEN 35000
+              WHEN r.name = 'lab_tech' THEN 40000
+              ELSE 0
+            END
+          ) as monthly_salary,
           u.status,
           u.start_date,
           NULL as end_date,
