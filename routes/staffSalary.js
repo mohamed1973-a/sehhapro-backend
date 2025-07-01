@@ -214,7 +214,4 @@ router.get(
   StaffSalaryController.getDoctorEarnings
 )
 
-module.exports = router 
- 
- 
- 
+module.exports = router

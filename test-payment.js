@@ -90,4 +90,4 @@ async function testPaymentSystem() {
   }
 }
 
-testPaymentSystem(); 
+testPaymentSystem();

@@ -240,10 +240,10 @@ router.get("/requests", protect, async (req, res) => {
         JOIN admin_clinics ac ON lr.lab_clinic_id = ac.clinic_id
         WHERE ac.admin_id = $1`
       queryParams.push(userId)
-      if (status) {
-        requestsQuery += ` AND lr.status = $2`
-        queryParams.push(status)
-      }
+          if (status) {
+            requestsQuery += ` AND lr.status = $2`
+            queryParams.push(status)
+          }
       requestsQuery += ` ORDER BY lr.created_at DESC`
     } else {
       // platform_admin sees all
@@ -254,14 +254,14 @@ router.get("/requests", protect, async (req, res) => {
       }
       requestsQuery += ` ORDER BY created_at DESC`
     }
-    const requestsResult = await pool.query(requestsQuery, queryParams)
-    res.status(200).json({
-      success: true,
-      data: requestsResult.rows,
-      message: `Found ${requestsResult.rows.length} lab requests`
-    })
-  } catch (queryError) {
-    logger.error(`Lab requests query error: ${queryError.message}`)
+      const requestsResult = await pool.query(requestsQuery, queryParams)
+      res.status(200).json({
+        success: true,
+        data: requestsResult.rows,
+        message: `Found ${requestsResult.rows.length} lab requests`
+      })
+    } catch (queryError) {
+      logger.error(`Lab requests query error: ${queryError.message}`)
     res.status(500).json({
       success: false,
       error: "Server error",
@@ -1223,5 +1223,19 @@ router.get("/lab-tech/results", protect, async (req, res) => {
     res.status(500).json({ success: false, error: "Server error" })
   }
 })
+
+// @route   GET api/labs/clinics
+// @desc    Get all clinics of type 'lab'
+// @access  Private (any authenticated user)
+router.get("/clinics", protect, async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT id, name, address, phone FROM clinics WHERE type = 'lab' ORDER BY name"
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: "Server error", details: err.message });
+  }
+});
 
 module.exports = router

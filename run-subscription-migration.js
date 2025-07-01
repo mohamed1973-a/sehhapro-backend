@@ -53,4 +53,4 @@ async function runSubscriptionMigration() {
 }
 
 // Run the migration
-runSubscriptionMigration(); 
+runSubscriptionMigration();

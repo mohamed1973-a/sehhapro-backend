@@ -404,4 +404,4 @@ router.delete('/subscriptions/:id', protect, role(['platform_admin']), async (re
   }
 });
 
-module.exports = router; 
+module.exports = router;

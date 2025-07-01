@@ -123,7 +123,4 @@ async function testTelemedicinePaymentFlow() {
 }
 
 // Run the test
-testTelemedicinePaymentFlow().catch(console.error) 
- 
- 
- 
+testTelemedicinePaymentFlow().catch(console.error)

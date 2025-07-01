@@ -13,4 +13,4 @@ function generateMeetingUrl() {
 
 module.exports = {
   generateMeetingUrl,
-}; 
+};

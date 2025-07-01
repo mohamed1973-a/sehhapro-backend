@@ -13,4 +13,4 @@ const ActivityController = {
   }
 };
 
-module.exports = ActivityController; 
+module.exports = ActivityController;

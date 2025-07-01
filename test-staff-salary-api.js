@@ -231,7 +231,4 @@ module.exports = {
   testGetSalaryStats,
   testUpdateSalaryPayment,
   testUpdateSalaryAdjustment
-} 
- 
- 
- 
+}
