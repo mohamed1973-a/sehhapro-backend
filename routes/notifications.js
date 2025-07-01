@@ -4,6 +4,7 @@ const NotificationController = require("../controllers/notificationController")
 const { protect, role } = require("../middleware/auth")
 const { body } = require("express-validator")
 const { validate } = require("../middleware/validator")
+const logger = require("../middleware/logger")
 
 // Create a new notification (with optional SMS via Twilio)
 router.post(
@@ -39,10 +40,24 @@ router.put("/:id/read", protect, NotificationController.markAsRead)
 router.put("/read-all", protect, NotificationController.markAllAsRead)
 
 // Delete a notification
-router.delete("/:id", protect, NotificationController.delete)
+router.delete("/:id", protect, (req, res, next) => {
+  logger.info(`Attempting to delete notification with ID: ${req.params.id}`)
+  if (!NotificationController.delete) {
+    logger.error("Delete method is undefined in NotificationController")
+    return res.status(500).json({ error: "Delete method is not defined" })
+  }
+  next()
+}, NotificationController.delete)
 
 // Delete all notifications
-router.delete("/", protect, NotificationController.clearAll)
+router.delete("/", protect, (req, res, next) => {
+  logger.info("Attempting to delete all notifications")
+  if (!NotificationController.clearAll) {
+    logger.error("ClearAll method is undefined in NotificationController")
+    return res.status(500).json({ error: "ClearAll method is not defined" })
+  }
+  next()
+}, NotificationController.clearAll)
 
 // Update SMS configuration (admin only)
 router.post(

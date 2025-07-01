@@ -169,6 +169,26 @@ class NotificationController {
       res.status(500).json({ error: "Server error" })
     }
   }
+
+  static async markAllAsRead(req, res) {
+    try {
+      await pool.query("UPDATE notifications SET read = TRUE WHERE user_id = $1", [req.user.id])
+      res.status(200).json({ message: "All notifications marked as read" })
+    } catch (err) {
+      res.status(500).json({ error: "Server error", details: err.message })
+    }
+  }
+
+  static async clearAll(req, res) {
+    try {
+      await pool.query("DELETE FROM notifications WHERE user_id = $1", [req.user.id])
+      logger.info(`All notifications deleted for user: ${req.user.id}`)
+      res.status(200).json({ message: "All notifications deleted" })
+    } catch (err) {
+      logger.error(`Delete all notifications error: ${err.message}`)
+      res.status(500).json({ error: "Server error", details: err.message })
+    }
+  }
 }
 
 module.exports = NotificationController
