@@ -214,4 +214,11 @@ router.get(
   StaffSalaryController.getDoctorEarnings
 )
 
+// Get user salary
+router.get(
+  "/users/:userId/salary",
+  role(["platform_admin", "clinic_admin", "doctor", "nurse", "patient"]),
+  StaffSalaryController.getUserSalary
+)
+
 module.exports = router
