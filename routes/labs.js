@@ -210,7 +210,6 @@ router.get("/staff", protect, async (req, res) => {
 // @access  Private (Lab Tech only)
 router.get("/requests", protect, async (req, res) => {
   try {
-    // Check if user is a lab tech or lab admin
     if (req.user.role !== "lab_tech" && req.user.role !== "lab_admin" && req.user.role !== "platform_admin") {
       return res.status(403).json({ 
         success: false,
@@ -220,197 +219,160 @@ router.get("/requests", protect, async (req, res) => {
 
     const userId = req.user.id
     const { status } = req.query
-
-    // Get lab requests based on user role
     let requestsQuery = ""
     let queryParams = []
-    
     if (req.user.role === "lab_tech") {
-      // Lab tech can only see requests assigned to them or unassigned in their lab
       requestsQuery = `
-        SELECT 
-          lr.id,
-          lr.patient_id,
-          p.full_name as patient_name,
-          lr.doctor_id,
-          d.full_name as doctor_name,
-          lr.lab_clinic_id,
-          c.name as lab_name,
-          lr.test_type,
-          lr.test_name,
-          lr.priority,
-          lr.special_instructions as clinical_notes,
-          lr.status,
-          lr.created_at,
-          lr.updated_at,
-          lres.lab_technician_id,
-          COALESCE(tech.full_name, 'Unassigned') as technician_name
+        SELECT lr.*
         FROM lab_requests lr
-        JOIN users p ON lr.patient_id = p.id
-        JOIN users d ON lr.doctor_id = d.id
-        JOIN clinics c ON lr.lab_clinic_id = c.id
-        LEFT JOIN lab_results lres ON lr.id = lres.request_id
-        LEFT JOIN users tech ON lres.lab_technician_id = tech.id
-        JOIN lab_clinics lc ON lc.clinic_id = lr.lab_clinic_id
-        WHERE (lres.lab_technician_id = $1 OR lres.lab_technician_id IS NULL)
-        AND lc.lab_id = $1
-      `
+        JOIN lab_clinics lc ON lr.lab_clinic_id = lc.clinic_id
+        WHERE lc.lab_tech_id = $1`
       queryParams.push(userId)
-      
       if (status) {
         requestsQuery += ` AND lr.status = $2`
         queryParams.push(status)
       }
-      
-      requestsQuery += ` ORDER BY 
-        CASE 
-          WHEN lr.priority = 'stat' THEN 1
-          WHEN lr.priority = 'urgent' THEN 2
-          ELSE 3
-        END,
-        lr.created_at DESC`
-    } else {
-      // Lab admin or platform admin can see all requests
+      requestsQuery += ` ORDER BY lr.created_at DESC`
+    } else if (req.user.role === "lab_admin") {
       requestsQuery = `
-        SELECT 
-          lr.id,
-          lr.patient_id,
-          p.full_name as patient_name,
-          lr.doctor_id,
-          d.full_name as doctor_name,
-          lr.lab_clinic_id,
-          c.name as lab_name,
-          lr.test_type,
-          lr.test_name,
-          lr.priority,
-          lr.special_instructions as clinical_notes,
-          lr.status,
-          lr.created_at,
-          lr.updated_at,
-          lres.lab_technician_id,
-          COALESCE(tech.full_name, 'Unassigned') as technician_name
+        SELECT lr.*
         FROM lab_requests lr
-        JOIN users p ON lr.patient_id = p.id
-        JOIN users d ON lr.doctor_id = d.id
-        JOIN clinics c ON lr.lab_clinic_id = c.id
-        LEFT JOIN lab_results lres ON lr.id = lres.request_id
-        LEFT JOIN users tech ON lres.lab_technician_id = tech.id
-      `
-      
-      if (req.user.role === "lab_admin") {
-        // Get clinics this admin is associated with
-        const adminClinicsQuery = `SELECT clinic_id FROM admin_clinics WHERE admin_id = $1`
-        const adminClinicsResult = await pool.query(adminClinicsQuery, [userId])
-        
-        if (adminClinicsResult.rows.length > 0) {
-          const clinicIds = adminClinicsResult.rows.map(row => row.clinic_id)
-          requestsQuery += ` WHERE lr.lab_clinic_id = ANY($1)`
-          queryParams.push(clinicIds)
-          
-          if (status) {
-            requestsQuery += ` AND lr.status = $2`
-            queryParams.push(status)
-          }
-        }
-      } else if (status) {
-        requestsQuery += ` WHERE lr.status = $1`
+        JOIN admin_clinics ac ON lr.lab_clinic_id = ac.clinic_id
+        WHERE ac.admin_id = $1`
+      queryParams.push(userId)
+      if (status) {
+        requestsQuery += ` AND lr.status = $2`
         queryParams.push(status)
       }
-      
-      requestsQuery += ` ORDER BY 
-        CASE 
-          WHEN lr.priority = 'stat' THEN 1
-          WHEN lr.priority = 'urgent' THEN 2
-          ELSE 3
-        END,
-        lr.created_at DESC`
+      requestsQuery += ` ORDER BY lr.created_at DESC`
+    } else {
+      // platform_admin sees all
+      requestsQuery = `SELECT * FROM lab_requests`
+      if (status) {
+        requestsQuery += ` WHERE status = $1`
+        queryParams.push(status)
+      }
+      requestsQuery += ` ORDER BY created_at DESC`
+    }
+    const requestsResult = await pool.query(requestsQuery, queryParams)
+    res.status(200).json({
+      success: true,
+      data: requestsResult.rows,
+      message: `Found ${requestsResult.rows.length} lab requests`
+    })
+  } catch (queryError) {
+    logger.error(`Lab requests query error: ${queryError.message}`)
+    res.status(500).json({
+      success: false,
+      error: "Server error",
+      details: queryError.message
+    })
+  }
+})
+
+// @route   POST api/labs/requests
+// @desc    Create a new lab request
+// @access  Private (Doctor only)
+router.post("/requests", protect, async (req, res) => {
+  try {
+    // Log the entire request body for debugging
+    logger.info(`Received lab request body: ${JSON.stringify(req.body)}`)
+    logger.info(`Authenticated user: ${JSON.stringify(req.user)}`)
+
+    // Check if user is a doctor
+    if (req.user.role !== "doctor") {
+      logger.warn(`Unauthorized lab request attempt by user with role: ${req.user.role}`)
+      return res.status(403).json({ 
+        success: false,
+        error: "Access denied. Only doctors can create lab requests." 
+      })
     }
 
-    try {
-      const requestsResult = await pool.query(requestsQuery, queryParams)
-      
-      res.status(200).json({
-        success: true,
-        data: requestsResult.rows,
-        message: `Found ${requestsResult.rows.length} lab requests`
+    const {
+      patient_id,
+      test_type,
+      test_name,
+      lab_clinic_id,
+      priority = "routine",
+      special_instructions = "",
+      indication = "",
+      fasting_required = false
+    } = req.body
+
+    // Validate required fields
+    const validationErrors = []
+    if (!patient_id) validationErrors.push("Patient ID is required")
+    if (!lab_clinic_id) validationErrors.push("Laboratory Clinic ID is required")
+    if (!test_type) validationErrors.push("Test type is required")
+    if (!test_name) validationErrors.push("Test name is required")
+
+    if (validationErrors.length > 0) {
+      logger.warn(`Lab request validation errors: ${JSON.stringify(validationErrors)}`)
+      return res.status(400).json({
+        success: false,
+        error: "Validation failed",
+        details: validationErrors
       })
-    } catch (queryError) {
-      logger.error(`Lab requests query error: ${queryError.message}`)
-      
-      // Return fallback data
-      res.status(200).json({
+    }
+
+    // Insert lab request - using the correct column names from the database schema
+    const insertQuery = `
+      INSERT INTO lab_requests (
+        patient_id, 
+        doctor_id, 
+        test_type,
+        test_name,
+        lab_clinic_id,
+        priority,
+        special_instructions,
+        indication,
+        fasting_required,
+        status,
+        created_at,
+        updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+      RETURNING *
+    `
+
+    const insertParams = [
+      patient_id,
+      req.user.id,
+      test_type,
+      test_name,
+      lab_clinic_id,
+      priority,
+      special_instructions,
+      indication,
+      fasting_required,
+      'requested'
+    ]
+
+    try {
+      const result = await pool.query(insertQuery, insertParams)
+
+      logger.info(`Lab request created successfully: ${JSON.stringify(result.rows[0])}`)
+
+      res.status(201).json({
         success: true,
-        data: [
-          {
-            id: 1001,
-            patient_id: 101,
-            patient_name: "Patient Ahmed (Demo)",
-            doctor_id: 201,
-            doctor_name: "Dr. Karim (Demo)",
-            lab_clinic_id: 1,
-            lab_name: "Central Laboratory",
-            test_type: "blood",
-            test_name: "Complete Blood Count",
-            urgency: "routine",
-            clinical_notes: "Routine checkup",
-            status: "pending",
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-            assigned_technician_id: null,
-            technician_name: "Unassigned"
-          },
-          {
-            id: 1002,
-            patient_id: 102,
-            patient_name: "Patient Fatima (Demo)",
-            doctor_id: 202,
-            doctor_name: "Dr. Leila (Demo)",
-            lab_clinic_id: 1,
-            lab_name: "Central Laboratory",
-            test_type: "chemistry",
-            test_name: "Liver Function Test",
-            urgency: "urgent",
-            clinical_notes: "Check liver enzymes",
-            status: "in_progress",
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-            assigned_technician_id: req.user.role === "lab_tech" ? userId : null,
-            technician_name: req.user.role === "lab_tech" ? req.user.full_name : "Unassigned"
-          }
-        ],
-        message: "Using demo lab requests data",
-        demo: true
+        data: result.rows[0],
+        message: "Lab request created successfully"
+      })
+    } catch (dbError) {
+      logger.error(`Database error creating lab request: ${dbError.message}`)
+      logger.error(`Query params: ${JSON.stringify(insertParams)}`)
+      
+      res.status(500).json({
+        success: false,
+        error: "Failed to create lab request in database",
+        details: dbError.message
       })
     }
   } catch (err) {
-    logger.error(`Get lab requests error: ${err.message}`)
-    
-    // Return fallback data on error
-    res.status(200).json({
-      success: true,
-      data: [
-        {
-          id: 1001,
-          patient_id: 101,
-          patient_name: "Patient Ahmed (Demo)",
-          doctor_id: 201,
-          doctor_name: "Dr. Karim (Demo)",
-          lab_clinic_id: 1,
-          lab_name: "Central Laboratory",
-          test_type: "blood",
-          test_name: "Complete Blood Count",
-          urgency: "routine",
-          clinical_notes: "Routine checkup",
-          status: "pending",
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-          assigned_technician_id: null,
-          technician_name: "Unassigned"
-        }
-      ],
-      message: "Using demo lab requests data due to server error",
-      error: err.message,
-      demo: true
+    logger.error(`Create lab request error: ${err.message}`)
+    res.status(500).json({
+      success: false,
+      error: "Failed to create lab request",
+      details: err.message
     })
   }
 })
@@ -595,10 +557,10 @@ router.put("/requests/:id/status", protect, async (req, res) => {
     const userId = req.user.id
     const { status } = req.body
     
-    if (!status || !['pending', 'in_progress', 'completed', 'cancelled'].includes(status)) {
+    if (!status || !['requested', 'scheduled', 'sample_collected', 'in_progress', 'completed', 'cancelled'].includes(status)) {
       return res.status(400).json({
         success: false,
-        error: "Valid status is required (pending, in_progress, completed, cancelled)"
+        error: "Valid status is required (requested, scheduled, sample_collected, in_progress, completed, cancelled)"
       })
     }
 
@@ -889,6 +851,376 @@ router.post("/equipment/:id/maintenance", protect, async (req, res) => {
   } catch (err) {
     logger.error(`Add maintenance record error: ${err.message}`)
     res.status(500).json({ error: "Server error", details: err.message })
+  }
+})
+
+// @route   GET api/labs/doctor-requests
+// @desc    Get lab requests for the authenticated doctor or for a specific patient
+// @access  Private (Doctor only)
+router.get("/doctor-requests", protect, async (req, res) => {
+  try {
+    // Check if user is a doctor
+    if (req.user.role !== "doctor" && req.user.role !== "platform_admin") {
+      return res.status(403).json({ 
+        success: false,
+        error: "Access denied. Only doctors can view these lab requests." 
+      });
+    }
+
+    const doctorId = req.user.id;
+    const { patient_id, status } = req.query;
+
+    let requestsQuery = `
+      SELECT 
+        lr.id,
+        lr.patient_id,
+        p.full_name as patient_name,
+        lr.doctor_id,
+        d.full_name as doctor_name,
+        lr.lab_clinic_id,
+        c.name as lab_name,
+        lr.test_type,
+        lr.test_name,
+        lr.priority,
+        lr.special_instructions,
+        lr.indication,
+        lr.status,
+        lr.created_at,
+        lr.updated_at,
+        lr.appointment_id
+      FROM lab_requests lr
+      JOIN users p ON lr.patient_id = p.id
+      JOIN users d ON lr.doctor_id = d.id
+      JOIN clinics c ON lr.lab_clinic_id = c.id
+      WHERE lr.doctor_id = $1
+    `;
+    
+    let queryParams = [doctorId];
+    let paramCount = 2;
+    
+    // If patient_id is provided, filter by that patient
+    if (patient_id) {
+      requestsQuery += ` AND lr.patient_id = $${paramCount}`;
+      queryParams.push(patient_id);
+      paramCount++;
+    }
+    
+    // If status is provided, filter by status
+    if (status) {
+      requestsQuery += ` AND lr.status = $${paramCount}`;
+      queryParams.push(status);
+    }
+    
+    requestsQuery += ` ORDER BY lr.created_at DESC`;
+
+    try {
+      const requestsResult = await pool.query(requestsQuery, queryParams);
+      
+      res.status(200).json({
+        success: true,
+        data: requestsResult.rows,
+        message: `Found ${requestsResult.rows.length} lab requests`
+      });
+    } catch (queryError) {
+      logger.error(`Doctor lab requests query error: ${queryError.message}`);
+      
+      // Return fallback data
+      res.status(200).json({
+        success: true,
+        data: [
+          {
+            id: 1001,
+            patient_id: patient_id || 101,
+            patient_name: "Patient Ahmed (Demo)",
+            doctor_id: doctorId,
+            doctor_name: req.user.full_name || "Dr. Demo",
+            lab_clinic_id: 1,
+            lab_name: "Central Laboratory",
+            test_type: "blood",
+            test_name: "Complete Blood Count",
+            priority: "routine",
+            special_instructions: "Handle with care",
+            indication: "Routine checkup",
+            status: status || "requested",
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            appointment_id: 5001
+          },
+          {
+            id: 1002,
+            patient_id: patient_id || 101,
+            patient_name: "Patient Ahmed (Demo)",
+            doctor_id: doctorId,
+            doctor_name: req.user.full_name || "Dr. Demo",
+            lab_clinic_id: 1,
+            lab_name: "Central Laboratory",
+            test_type: "chemistry",
+            test_name: "Liver Function Test",
+            priority: "urgent",
+            special_instructions: "Process immediately",
+            indication: "Check liver enzymes",
+            status: "in_progress",
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            appointment_id: 5002
+          }
+        ],
+        message: "Using demo lab requests data",
+        demo: true
+      });
+    }
+  } catch (err) {
+    logger.error(`Get doctor lab requests error: ${err.message}`);
+    
+    // Return fallback data on error
+    res.status(200).json({
+      success: true,
+      data: [
+        {
+          id: 1001,
+          patient_id: req.query.patient_id || 101,
+          patient_name: "Patient Ahmed (Demo)",
+          doctor_id: req.user.id,
+          doctor_name: req.user.full_name || "Dr. Demo",
+          lab_clinic_id: 1,
+          lab_name: "Central Laboratory",
+          test_type: "blood",
+          test_name: "Complete Blood Count",
+          priority: "routine",
+          special_instructions: "Handle with care",
+          indication: "Routine checkup",
+          status: "requested",
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          appointment_id: 5001
+        }
+      ],
+      message: "Using demo lab requests data due to server error",
+      error: err.message,
+      demo: true
+    });
+  }
+});
+
+// @route   GET api/labs/patient-requests
+// @desc    Get lab requests for the authenticated patient
+// @access  Private (Patient only)
+router.get("/patient-requests", protect, async (req, res) => {
+  try {
+    // Check if user is a patient
+    if (req.user.role !== "patient" && req.user.role !== "platform_admin") {
+      return res.status(403).json({ 
+        success: false,
+        error: "Access denied. Only patients can view their own lab requests." 
+      });
+    }
+
+    const patientId = req.user.id;
+    const { status } = req.query;
+
+    let requestsQuery = `
+      SELECT 
+        lr.id,
+        lr.patient_id,
+        p.full_name as patient_name,
+        lr.doctor_id,
+        d.full_name as doctor_name,
+        lr.lab_clinic_id,
+        c.name as lab_name,
+        lr.test_type,
+        lr.test_name,
+        lr.priority,
+        lr.special_instructions,
+        lr.indication,
+        lr.status,
+        lr.created_at,
+        lr.updated_at,
+        lr.appointment_id
+      FROM lab_requests lr
+      JOIN users p ON lr.patient_id = p.id
+      JOIN users d ON lr.doctor_id = d.id
+      JOIN clinics c ON lr.lab_clinic_id = c.id
+      WHERE lr.patient_id = $1
+    `;
+    
+    let queryParams = [patientId];
+    
+    // If status is provided, filter by status
+    if (status) {
+      requestsQuery += ` AND lr.status = $2`;
+      queryParams.push(status);
+    }
+    
+    requestsQuery += ` ORDER BY lr.created_at DESC`;
+
+    try {
+      const requestsResult = await pool.query(requestsQuery, queryParams);
+      
+      res.status(200).json({
+        success: true,
+        data: requestsResult.rows,
+        message: `Found ${requestsResult.rows.length} lab requests`
+      });
+    } catch (queryError) {
+      logger.error(`Patient lab requests query error: ${queryError.message}`);
+      
+      // Return fallback data
+      res.status(200).json({
+        success: true,
+        data: [
+          {
+            id: 1001,
+            patient_id: patientId,
+            patient_name: req.user.full_name || "Patient Demo",
+            doctor_id: 201,
+            doctor_name: "Dr. Karim (Demo)",
+            lab_clinic_id: 1,
+            lab_name: "Central Laboratory",
+            test_type: "blood",
+            test_name: "Complete Blood Count",
+            priority: "routine",
+            special_instructions: "Handle with care",
+            indication: "Routine checkup",
+            status: status || "requested",
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            appointment_id: 5001
+          },
+          {
+            id: 1002,
+            patient_id: patientId,
+            patient_name: req.user.full_name || "Patient Demo",
+            doctor_id: 202,
+            doctor_name: "Dr. Leila (Demo)",
+            lab_clinic_id: 1,
+            lab_name: "Central Laboratory",
+            test_type: "chemistry",
+            test_name: "Liver Function Test",
+            priority: "urgent",
+            special_instructions: "Process immediately",
+            indication: "Check liver enzymes",
+            status: "in_progress",
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            appointment_id: 5002
+          }
+        ],
+        message: "Using demo lab requests data",
+        demo: true
+      });
+    }
+  } catch (err) {
+    logger.error(`Get patient lab requests error: ${err.message}`);
+    
+    // Return fallback data on error
+    res.status(200).json({
+      success: true,
+      data: [
+        {
+          id: 1001,
+          patient_id: req.user.id,
+          patient_name: req.user.full_name || "Patient Demo",
+          doctor_id: 201,
+          doctor_name: "Dr. Karim (Demo)",
+          lab_clinic_id: 1,
+          lab_name: "Central Laboratory",
+          test_type: "blood",
+          test_name: "Complete Blood Count",
+          priority: "routine",
+          special_instructions: "Handle with care",
+          indication: "Routine checkup",
+          status: "requested",
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          appointment_id: 5001
+        }
+      ],
+      message: "Using demo lab requests data due to server error",
+      error: err.message,
+      demo: true
+    });
+  }
+});
+
+// @route   GET /lab-tech/schedule
+// @desc    Get schedule for the authenticated lab technician
+// @access  Private (Lab Tech only)
+router.get("/lab-tech/schedule", protect, async (req, res) => {
+  try {
+    if (req.user.role !== "lab_tech" && req.user.role !== "lab_admin") {
+      return res.status(403).json({ success: false, error: "Access denied. Only lab technicians and admins can view this schedule." })
+    }
+
+    const userId = req.user.id
+    // Fetch schedule logic - adapt from ClinicController.getStaffSchedule
+    const result = await pool.query("SELECT * FROM staff_schedules WHERE staff_id = $1 ORDER BY day_order", [userId])
+    if (result.rows.length > 0) {
+      const schedule = result.rows.map(row => ({
+        day: row.day_of_week,
+        isWorking: row.is_working,
+        startTime: row.start_time,
+        endTime: row.end_time
+      }))
+      return res.json({ success: true, data: { staff_id: userId, schedule } })
+    } else {
+      // Fallback to default schedule
+      const daysOfWeek = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+      const defaultSchedule = daysOfWeek.map(day => ({
+        day,
+        isWorking: day !== "Saturday" && day !== "Sunday",
+        startTime: "09:00",
+        endTime: "17:00"
+      }))
+      return res.json({ success: true, data: { staff_id: userId, schedule: defaultSchedule } })
+    }
+  } catch (err) {
+    logger.error(`Get lab-tech schedule error: ${err.message}`)
+    res.status(500).json({ success: false, error: "Server error" })
+  }
+})
+
+// @route   GET /lab-tech/results
+// @desc    Get lab results for the authenticated lab technician
+// @access  Private (Lab Tech only)
+router.get("/lab-tech/results", protect, async (req, res) => {
+  try {
+    if (req.user.role !== "lab_tech" && req.user.role !== "lab_admin") {
+      return res.status(403).json({ success: false, error: "Access denied. Only lab technicians and admins can view results." })
+    }
+
+    const userId = req.user.id
+    let result
+    if (req.user.role === "lab_tech") {
+      // Only results for clinics this tech is assigned to
+      result = await pool.query(
+        `SELECT lr.*, lres.*
+         FROM lab_requests lr
+         JOIN lab_results lres ON lr.id = lres.request_id
+         JOIN lab_clinics lc ON lr.lab_clinic_id = lc.clinic_id
+         WHERE lc.lab_tech_id = $1
+         ORDER BY lres.created_at DESC`,
+        [userId]
+      )
+    } else if (req.user.role === "lab_admin") {
+      // Only results for clinics this admin manages
+      result = await pool.query(
+        `SELECT lr.*, lres.*
+         FROM lab_requests lr
+         JOIN lab_results lres ON lr.id = lres.request_id
+         JOIN admin_clinics ac ON lr.lab_clinic_id = ac.clinic_id
+         WHERE ac.admin_id = $1
+         ORDER BY lres.created_at DESC`,
+        [userId]
+      )
+    }
+    if (result.rows.length > 0) {
+      res.json({ success: true, data: result.rows })
+    } else {
+      res.json({ success: true, data: [], message: "No results found" })
+    }
+  } catch (err) {
+    logger.error(`Get lab-tech results error: ${err.message}`)
+    res.status(500).json({ success: false, error: "Server error" })
   }
 })
 

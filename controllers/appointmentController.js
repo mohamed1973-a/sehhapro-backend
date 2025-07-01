@@ -534,33 +534,34 @@ const AppointmentController = {
         let sessionQuery
         let sessionParams
 
+        // Always use appointmentId as session id
         if (availableColumns.includes("patient_id") && availableColumns.includes("doctor_id")) {
-          // Both patient_id and doctor_id columns exist
           sessionQuery = `
             INSERT INTO telemedicine_sessions 
-            (appointment_id, patient_id, doctor_id, status, scheduled_time)
-            VALUES ($1, $2, $3, $4, $5)
+            (id, appointment_id, patient_id, doctor_id, status, started_at)
+            VALUES ($1, $1, $2, $3, $4, NOW())
+            ON CONFLICT (id) DO NOTHING
             RETURNING id
           `
-          sessionParams = [appointment.id, patientId, doctorId, "scheduled", appointmentDate]
+          sessionParams = [appointmentId, appointment.patient_id, appointment.doctor_id, "in-progress"]
         } else if (availableColumns.includes("doctor_id")) {
-          // Only doctor_id column exists
           sessionQuery = `
             INSERT INTO telemedicine_sessions 
-            (appointment_id, doctor_id, status, scheduled_time)
-            VALUES ($1, $2, $3, $4)
+            (id, appointment_id, doctor_id, status, started_at)
+            VALUES ($1, $1, $2, $3, NOW())
+            ON CONFLICT (id) DO NOTHING
             RETURNING id
           `
-          sessionParams = [appointment.id, doctorId, "scheduled", appointmentDate]
+          sessionParams = [appointmentId, appointment.doctor_id, "in-progress"]
         } else {
-          // Minimal columns - just appointment_id and status
           sessionQuery = `
             INSERT INTO telemedicine_sessions 
-            (appointment_id, status, scheduled_time)
-            VALUES ($1, $2, $3)
+            (id, appointment_id, status, started_at)
+            VALUES ($1, $1, $2, NOW())
+            ON CONFLICT (id) DO NOTHING
             RETURNING id
           `
-          sessionParams = [appointment.id, "scheduled", appointmentDate]
+          sessionParams = [appointmentId, "in-progress"]
         }
 
         console.log("Telemedicine session query:", sessionQuery)
@@ -1123,27 +1124,31 @@ const AppointmentController = {
         let createSessionQuery
         let sessionParams
 
+        // Always use appointmentId as session id
         if (availableColumns.includes("patient_id") && availableColumns.includes("doctor_id")) {
           createSessionQuery = `
             INSERT INTO telemedicine_sessions 
-            (appointment_id, patient_id, doctor_id, status, started_at)
-            VALUES ($1, $2, $3, $4, NOW())
+            (id, appointment_id, patient_id, doctor_id, status, started_at)
+            VALUES ($1, $1, $2, $3, $4, NOW())
+            ON CONFLICT (id) DO NOTHING
             RETURNING id
           `
           sessionParams = [appointmentId, appointment.patient_id, appointment.doctor_id, "in-progress"]
         } else if (availableColumns.includes("doctor_id")) {
           createSessionQuery = `
             INSERT INTO telemedicine_sessions 
-            (appointment_id, doctor_id, status, started_at)
-            VALUES ($1, $2, $3, NOW())
+            (id, appointment_id, doctor_id, status, started_at)
+            VALUES ($1, $1, $2, $3, NOW())
+            ON CONFLICT (id) DO NOTHING
             RETURNING id
           `
           sessionParams = [appointmentId, appointment.doctor_id, "in-progress"]
         } else {
           createSessionQuery = `
             INSERT INTO telemedicine_sessions 
-            (appointment_id, status, started_at)
-            VALUES ($1, $2, NOW())
+            (id, appointment_id, status, started_at)
+            VALUES ($1, $1, $2, NOW())
+            ON CONFLICT (id) DO NOTHING
             RETURNING id
           `
           sessionParams = [appointmentId, "in-progress"]

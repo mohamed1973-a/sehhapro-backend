@@ -91,14 +91,7 @@ class StaffSalaryController {
           u.email,
           r.name as position,
           u.employment_type,
-          COALESCE(u.base_salary, 
-            CASE 
-              WHEN r.name = 'doctor' THEN 50000
-              WHEN r.name = 'nurse' THEN 35000
-              WHEN r.name = 'lab_tech' THEN 40000
-              ELSE 0
-            END
-          ) as monthly_salary,
+          NULL as monthly_salary,
           u.status,
           u.start_date,
           NULL as end_date,
@@ -1277,6 +1270,105 @@ class StaffSalaryController {
       })
     } finally {
       client.release()
+    }
+  }
+
+  /**
+   * Get doctor earnings
+   */
+  static async getDoctorEarnings(req, res) {
+    try {
+      const doctorId = req.user.id;
+      
+      console.log(`[StaffSalaryController] Getting earnings for doctor ${doctorId}`);
+
+      // Validate doctor role
+      if (req.user.role !== "doctor") {
+        return res.status(403).json({
+          success: false,
+          error: "Access denied. Only doctors can access their earnings"
+        });
+      }
+
+      // Get basic information including base salary
+      const doctorInfo = await pool.query(
+        `SELECT id, full_name, COALESCE(base_salary, 0) as base_salary, balance
+         FROM users
+         WHERE id = $1 AND status = 'active'`,
+        [doctorId]
+      );
+
+      if (doctorInfo.rows.length === 0) {
+        return res.status(404).json({
+          success: false,
+          error: "Doctor not found or not active"
+        });
+      }
+
+      // Get salary payments
+      const paymentsResult = await pool.query(
+        `SELECT 
+           id,
+           payment_month,
+           base_amount,
+           bonuses,
+           deductions,
+           net_salary,
+           payment_status,
+           payment_date,
+           payment_method,
+           reference_number
+         FROM staff_salary_payments 
+         WHERE staff_id = $1 AND staff_type = 'user_staff'
+         ORDER BY payment_month DESC
+         LIMIT 12`,
+        [doctorId]
+      );
+
+      // Get appointment earnings
+      const appointmentEarnings = await pool.query(
+        `SELECT 
+           SUM(doctor_fee) as total_fees,
+           COUNT(*) as total_appointments,
+           COUNT(CASE WHEN payment_status = 'paid' THEN 1 END) as paid_appointments,
+           SUM(CASE WHEN payment_status = 'paid' THEN doctor_fee ELSE 0 END) as paid_fees
+         FROM appointments
+         WHERE doctor_id = $1 AND status = 'completed'
+         AND appointment_date >= NOW() - INTERVAL '6 months'`,
+        [doctorId]
+      );
+
+      // Format the response
+      const earnings = {
+        doctor: doctorInfo.rows[0],
+        payments: paymentsResult.rows,
+        appointments: {
+          totalAppointments: parseInt(appointmentEarnings.rows[0].total_appointments) || 0,
+          paidAppointments: parseInt(appointmentEarnings.rows[0].paid_appointments) || 0,
+          totalFees: parseFloat(appointmentEarnings.rows[0].total_fees) || 0,
+          paidFees: parseFloat(appointmentEarnings.rows[0].paid_fees) || 0
+        },
+        summary: {
+          currentBalance: parseFloat(doctorInfo.rows[0].balance) || 0,
+          baseSalary: parseFloat(doctorInfo.rows[0].base_salary) || 0
+        }
+      };
+
+      console.log(`[StaffSalaryController] Retrieved earnings for doctor ${doctorId}`);
+
+      res.json({
+        success: true,
+        data: earnings,
+        message: "Doctor earnings retrieved successfully"
+      });
+    } catch (error) {
+      console.error("[StaffSalaryController] Get doctor earnings error:", error);
+      logger.error(`Get doctor earnings error: ${error.message}`);
+      res.status(500).json({
+        success: false,
+        error: "Server error",
+        details: error.message
+      });
     }
   }
 }

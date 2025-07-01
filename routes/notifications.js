@@ -11,10 +11,14 @@ router.post(
   protect,
   [
     body("userId").isInt().withMessage("User ID must be an integer"),
+    body("title").optional().isString().withMessage("Title must be a string"),
     body("message").notEmpty().withMessage("Message is required"),
     body("type").notEmpty().withMessage("Type is required"),
-    body("priority").optional().isIn(["low", "normal", "high"]).withMessage("Invalid priority"),
+    body("priority").optional().isIn(["low", "normal", "high", "urgent"]).withMessage("Invalid priority"),
     body("sendSms").optional().isBoolean().withMessage("sendSms must be a boolean"),
+    body("refId").optional().isInt().withMessage("Reference ID must be an integer"),
+    body("refTable").optional().isString().withMessage("Reference table must be a string"),
+    body("actionUrl").optional().isString().withMessage("Action URL must be a string"),
     // Optional: Add carrier if you want to support fallback logic in the future
     body("carrier")
       .optional()
@@ -31,8 +35,14 @@ router.get("/", protect, NotificationController.getAll)
 // Mark a notification as read
 router.put("/:id/read", protect, NotificationController.markAsRead)
 
+// Mark all notifications as read
+router.put("/read-all", protect, NotificationController.markAllAsRead)
+
 // Delete a notification
 router.delete("/:id", protect, NotificationController.delete)
+
+// Delete all notifications
+router.delete("/", protect, NotificationController.clearAll)
 
 // Update SMS configuration (admin only)
 router.post(

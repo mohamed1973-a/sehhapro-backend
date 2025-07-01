@@ -12,7 +12,7 @@ const asyncHandler = require("../utils/asyncHandler")
 // Generate JWT tokens
 const generateTokens = (userId) => {
   const accessToken = jwt.sign({ userId }, process.env.JWT_SECRET, {
-    expiresIn: "4h",
+    expiresIn: "10h",
   })
   const refreshToken = jwt.sign({ userId }, process.env.JWT_REFRESH_SECRET, {
     expiresIn: "7d",

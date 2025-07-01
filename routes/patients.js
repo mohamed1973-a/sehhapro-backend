@@ -966,4 +966,100 @@ router.get("/:id", protect, async (req, res) => {
   }
 })
 
+// Get patient medical history
+router.get("/:id/medical-history", protect, async (req, res) => {
+  try {
+    const patientId = req.params.id
+    const userRole = req.user.role
+    const userId = req.user.id
+
+    // Verify authorization
+    if (userRole !== "doctor" && userRole !== "clinic_admin" && userId !== Number(patientId)) {
+      return res.status(403).json({ error: "Not authorized to access these records" })
+    }
+
+    // If doctor, verify doctor-patient relationship
+    if (userRole === "doctor") {
+      const relationshipCheck = await executeQuery(
+        `SELECT 1 FROM appointments 
+         WHERE doctor_id = $1 AND patient_id = $2 
+         UNION 
+         SELECT 1 FROM doctor_clinics dc 
+         JOIN patient_clinics pc ON dc.clinic_id = pc.clinic_id 
+         WHERE dc.doctor_id = $1 AND pc.patient_id = $2
+         LIMIT 1`,
+        [userId, patientId]
+      )
+
+      if (relationshipCheck.rows.length === 0) {
+        return res.status(403).json({ error: "Not authorized to access records for this patient" })
+      }
+    }
+
+    // Fetch medical records with related data
+    const recordsQuery = `
+      SELECT 
+        mr.*,
+        u.full_name AS doctor_name,
+        a.scheduled_for AS appointment_date,
+        COALESCE(
+          json_agg(
+            json_build_object(
+              'id', md.id,
+              'filename', md.filename,
+              'file_type', md.file_type,
+              'file_size', md.file_size,
+              'file_url', md.file_url,
+              'uploaded_by', md.uploaded_by,
+              'uploaded_at', md.uploaded_at
+            )
+          ) FILTER (WHERE md.id IS NOT NULL),
+          '[]'
+        ) as documents
+      FROM medical_records mr
+      JOIN users u ON mr.doctor_id = u.id
+      LEFT JOIN appointments a ON mr.appointment_id = a.id
+      LEFT JOIN medical_documents md ON mr.id = md.record_id
+      WHERE mr.patient_id = $1
+      GROUP BY mr.id, u.full_name, a.scheduled_for
+      ORDER BY mr.created_at DESC
+    `
+
+    const result = await executeQuery(recordsQuery, [patientId])
+
+    // Format the response according to the frontend types
+    const formattedRecords = result.rows.map(record => ({
+      id: record.id.toString(),
+      patient_id: record.patient_id.toString(),
+      doctor_id: record.doctor_id.toString(),
+      appointment_id: record.appointment_id ? record.appointment_id.toString() : null,
+      record_type: record.entry_type,
+      diagnosis: record.diagnosis || "",
+      treatment: record.treatment || "",
+      notes: record.notes || "",
+      created_at: record.created_at.toISOString(),
+      updated_at: record.updated_at.toISOString(),
+      doctor_name: record.doctor_name,
+      appointment_date: record.appointment_date ? record.appointment_date.toISOString() : null,
+      documents: record.documents || []
+    }))
+
+    res.json({
+      success: true,
+      data: {
+        records: formattedRecords,
+        total_count: formattedRecords.length,
+        last_updated: formattedRecords[0]?.updated_at || new Date().toISOString()
+      }
+    })
+  } catch (error) {
+    logger.error(`Get patient medical history error: ${error.message}`)
+    res.status(500).json({
+      success: false,
+      error: "Server error",
+      details: error.message
+    })
+  }
+})
+
 module.exports = router

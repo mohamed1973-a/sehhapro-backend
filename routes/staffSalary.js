@@ -203,6 +203,17 @@ router.put(
   StaffSalaryController.updateUserSalary
 )
 
+// =====================================================
+// DOCTOR EARNINGS
+// =====================================================
+
+// Get doctor earnings
+router.get(
+  "/doctor/earnings",
+  role(["doctor"]),
+  StaffSalaryController.getDoctorEarnings
+)
+
 module.exports = router 
  
  
