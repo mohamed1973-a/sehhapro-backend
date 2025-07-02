@@ -221,12 +221,23 @@ router.get("/requests", protect, async (req, res) => {
     const userId = req.user.id
     const { status } = req.query
 
+    // Normalize status to match database values
+    let normalizedStatus = status
+    switch (status) {
+      case 'assigned':
+        normalizedStatus = 'in_progress'
+        break
+      case 'unassigned':
+        normalizedStatus = 'requested'
+        break
+    }
+
     // Get lab requests based on user role
     let requestsQuery = ""
     let queryParams = []
     
     if (req.user.role === "lab_tech") {
-      // Lab tech can only see requests assigned to them or unassigned in their lab
+      // Lab tech can only see requests in their assigned lab clinics
       requestsQuery = `
         SELECT 
           lr.id,
@@ -236,42 +247,61 @@ router.get("/requests", protect, async (req, res) => {
           d.full_name as doctor_name,
           lr.lab_clinic_id,
           c.name as lab_name,
-          lr.test_type,
-          lr.test_name,
+          lr.tests,
           lr.priority,
-          lr.special_instructions,
-          lr.indication,
+          lr.notes as special_instructions,
           lr.status,
           lr.created_at,
-          lr.updated_at,
-          lres.lab_technician_id,
-          COALESCE(tech.full_name, 'Unassigned') as technician_name
+          lr.updated_at
         FROM lab_requests lr
         JOIN users p ON lr.patient_id = p.id
         JOIN users d ON lr.doctor_id = d.id
         JOIN clinics c ON lr.lab_clinic_id = c.id
-        LEFT JOIN lab_results lres ON lr.id = lres.request_id
-        LEFT JOIN users tech ON lres.lab_technician_id = tech.id
-        JOIN lab_clinics lc ON lc.clinic_id = lr.lab_clinic_id
-        WHERE (lres.lab_technician_id = $1 OR lres.lab_technician_id IS NULL)
-        AND lc.lab_id = $1
+        JOIN lab_clinics lc ON c.id = lc.clinic_id
+        WHERE 
+          lc.lab_id = $1 
+          ${normalizedStatus ? 'AND lr.status = $2' : ''}
+        ORDER BY lr.priority DESC, lr.created_at DESC
       `
-      queryParams.push(userId)
       
-      if (status) {
-        requestsQuery += ` AND lr.status = $2`
-        queryParams.push(status)
-      }
+      // Prepare query parameters
+      queryParams = normalizedStatus 
+        ? [userId, normalizedStatus] 
+        : [userId]
+    } else if (req.user.role === "lab_admin") {
+      // Lab admin can see requests for clinics they manage
+      requestsQuery = `
+        SELECT 
+          lr.id,
+          lr.patient_id,
+          p.full_name as patient_name,
+          lr.doctor_id,
+          d.full_name as doctor_name,
+          lr.lab_clinic_id,
+          c.name as lab_name,
+          lr.tests,
+          lr.priority,
+          lr.notes as special_instructions,
+          lr.status,
+          lr.created_at,
+          lr.updated_at
+        FROM lab_requests lr
+        JOIN users p ON lr.patient_id = p.id
+        JOIN users d ON lr.doctor_id = d.id
+        JOIN clinics c ON lr.lab_clinic_id = c.id
+        JOIN admin_clinics ac ON c.id = ac.clinic_id
+        WHERE 
+          ac.admin_id = $1 
+          ${normalizedStatus ? 'AND lr.status = $2' : ''}
+        ORDER BY lr.priority DESC, lr.created_at DESC
+      `
       
-      requestsQuery += ` ORDER BY 
-        CASE 
-          WHEN lr.priority = 'stat' THEN 1
-          WHEN lr.priority = 'urgent' THEN 2
-          ELSE 3
-        END,
-        lr.created_at DESC`
+      // Prepare query parameters
+      queryParams = normalizedStatus 
+        ? [userId, normalizedStatus] 
+        : [userId]
     } else {
-      // Lab admin or platform admin can see all requests
+      // Platform admin can see all requests
       requestsQuery = `
         SELECT 
           lr.id,
@@ -281,111 +311,31 @@ router.get("/requests", protect, async (req, res) => {
           d.full_name as doctor_name,
           lr.lab_clinic_id,
           c.name as lab_name,
-          lr.test_type,
-          lr.test_name,
+          lr.tests,
           lr.priority,
-          lr.special_instructions,
-          lr.indication,
+          lr.notes as special_instructions,
           lr.status,
           lr.created_at,
-          lr.updated_at,
-          lres.lab_technician_id,
-          COALESCE(tech.full_name, 'Unassigned') as technician_name
+          lr.updated_at
         FROM lab_requests lr
         JOIN users p ON lr.patient_id = p.id
         JOIN users d ON lr.doctor_id = d.id
         JOIN clinics c ON lr.lab_clinic_id = c.id
-        LEFT JOIN lab_results lres ON lr.id = lres.request_id
-        LEFT JOIN users tech ON lres.lab_technician_id = tech.id
+        ${normalizedStatus ? 'WHERE lr.status = $1' : ''}
+        ORDER BY lr.priority DESC, lr.created_at DESC
       `
       
-      if (req.user.role === "lab_admin") {
-        // Get clinics this admin is associated with
-        const adminClinicsQuery = `SELECT clinic_id FROM admin_clinics WHERE admin_id = $1`
-        const adminClinicsResult = await pool.query(adminClinicsQuery, [userId])
-        
-        if (adminClinicsResult.rows.length > 0) {
-          const clinicIds = adminClinicsResult.rows.map(row => row.clinic_id)
-          requestsQuery += ` WHERE lr.lab_clinic_id = ANY($1)`
-          queryParams.push(clinicIds)
-          
-          if (status) {
-            requestsQuery += ` AND lr.status = $2`
-            queryParams.push(status)
-          }
-        }
-      } else if (status) {
-        requestsQuery += ` WHERE lr.status = $1`
-        queryParams.push(status)
-      }
-      
-      requestsQuery += ` ORDER BY 
-        CASE 
-          WHEN lr.priority = 'stat' THEN 1
-          WHEN lr.priority = 'urgent' THEN 2
-          ELSE 3
-        END,
-        lr.created_at DESC`
+      // Prepare query parameters
+      queryParams = normalizedStatus ? [normalizedStatus] : []
     }
 
-    try {
-      const requestsResult = await pool.query(requestsQuery, queryParams)
-      
-      res.status(200).json({
-        success: true,
-        data: requestsResult.rows,
-        message: `Found ${requestsResult.rows.length} lab requests`
-      })
-    } catch (queryError) {
-      logger.error(`Lab requests query error: ${queryError.message}`)
-      
-      // Return fallback data
-      res.status(200).json({
-        success: true,
-        data: [
-          {
-            id: 1001,
-            patient_id: 101,
-            patient_name: "Patient Ahmed (Demo)",
-            doctor_id: 201,
-            doctor_name: "Dr. Karim (Demo)",
-            lab_clinic_id: 1,
-            lab_name: "Central Laboratory",
-            test_type: "blood",
-            test_name: "Complete Blood Count",
-            priority: "routine",
-            special_instructions: "Handle with care",
-            indication: "Routine checkup",
-            status: "requested",
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-            assigned_technician_id: null,
-            technician_name: "Unassigned"
-          },
-          {
-            id: 1002,
-            patient_id: 102,
-            patient_name: "Patient Fatima (Demo)",
-            doctor_id: 202,
-            doctor_name: "Dr. Leila (Demo)",
-            lab_clinic_id: 1,
-            lab_name: "Central Laboratory",
-            test_type: "chemistry",
-            test_name: "Liver Function Test",
-            priority: "urgent",
-            special_instructions: "Process immediately",
-            indication: "Check liver enzymes",
-            status: "in_progress",
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-            assigned_technician_id: req.user.role === "lab_tech" ? userId : null,
-            technician_name: req.user.role === "lab_tech" ? req.user.full_name : "Unassigned"
-          }
-        ],
-        message: "Using demo lab requests data",
-        demo: true
-      })
-    }
+    const result = await pool.query(requestsQuery, queryParams)
+
+    res.status(200).json({
+      success: true,
+      data: result.rows,
+      message: `Found ${result.rows.length} lab requests`
+    })
   } catch (err) {
     logger.error(`Get lab requests error: ${err.message}`)
     
@@ -406,7 +356,7 @@ router.get("/requests", protect, async (req, res) => {
             priority: "routine",
             special_instructions: "Handle with care",
             indication: "Routine checkup",
-          status: "pending",
+          status: "requested",
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
           assigned_technician_id: null,

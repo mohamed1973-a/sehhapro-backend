@@ -6,6 +6,7 @@ const path = require("path")
 const db = require("../config/database")
 const asyncHandler = require("../utils/asyncHandler")
 const { validationResult } = require("express-validator")
+const NotificationController = require("./notificationController")
 
 class PrescriptionController {
   /**
@@ -654,10 +655,19 @@ class PrescriptionController {
 
       logger.info(`Prescription ${id} updated by ${req.user.role} ${req.user.id}`)
 
-      res.json({
+      // Notifications for prescription update
+      await NotificationController.createNotification({
+        userId: prescription.patient_id,
+        message: `Your prescription has been updated by Dr. ${req.user.full_name}`,
+        type: "prescription",
+        priority: "normal",
+        refId: prescription.id
+      })
+
+      res.status(200).json({
         success: true,
-        message: "Prescription updated successfully",
         data: prescription,
+        notifications: "Created for patient"
       })
     } catch (err) {
       if (dbTransaction) {
@@ -749,10 +759,28 @@ class PrescriptionController {
 
       logger.info(`Prescription ${id} cancelled by ${req.user.role} ${req.user.id}`)
 
-      res.json({
+      // Notifications for prescription deletion
+      await NotificationController.createNotification({
+        userId: prescription.patient_id,
+        message: `Prescription ${prescription.prescription_number} has been deleted`,
+        type: "prescription",
+        priority: "high",
+        refId: id
+      })
+
+      await NotificationController.createNotification({
+        userId: prescription.doctor_id,
+        message: `Prescription ${prescription.prescription_number} for patient has been deleted`,
+        type: "prescription",
+        priority: "normal",
+        refId: id
+      })
+
+      res.status(200).json({
         success: true,
         message: "Prescription cancelled successfully",
         data: updatedPrescription,
+        notifications: "Created for patient and doctor"
       })
     } catch (err) {
       if (dbTransaction) {
@@ -826,10 +854,29 @@ class PrescriptionController {
 
       logger.info(`Refill requested for prescription ${id} by patient ${req.user.id}`)
 
-      res.json({
+      // Notification for doctor about refill request
+      await NotificationController.createNotification({
+        userId: prescription.doctor_id,
+        message: `Refill requested for prescription by ${req.user.full_name}`,
+        type: "prescription",
+        priority: "high",
+        refId: prescription.id
+      })
+
+      // Notification for patient about refill request status
+      await NotificationController.createNotification({
+        userId: prescription.patient_id,
+        message: `Refill request submitted for your prescription`,
+        type: "prescription",
+        priority: "normal",
+        refId: prescription.id
+      })
+
+      res.status(200).json({
         success: true,
         message: "Refill request processed successfully",
         data: updatedPrescription,
+        notifications: "Created for doctor and patient"
       })
     } catch (err) {
       if (dbTransaction) {

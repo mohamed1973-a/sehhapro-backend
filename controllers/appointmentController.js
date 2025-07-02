@@ -2,6 +2,7 @@ const { pool } = require("../config/database")
 const logger = require("../middleware/logger")
 const { executeQuery } = require("../utils/dbUtils")
 const PaymentService = require("../services/paymentService")
+const NotificationController = require("./notificationController")
 
 // Helper function to parse date strings without timezone conversion
 function parseLocalDateString(dateTimeString) {
@@ -636,10 +637,29 @@ const AppointmentController = {
         slotAvailable: fullAppointment.slot_available,
       })
 
+      // Create notification for doctor
+      await NotificationController.createNotification({
+        userId: fullAppointment.doctor_id,
+        message: `New appointment booked with ${fullAppointment.patient_name}`,
+        type: "appointment",
+        priority: "high",
+        refId: fullAppointment.id
+      })
+
+      // Create notification for patient
+      await NotificationController.createNotification({
+        userId: fullAppointment.patient_id,
+        message: `Appointment booked with Dr. ${fullAppointment.doctor_name}`,
+        type: "appointment",
+        priority: "normal",
+        refId: fullAppointment.id
+      })
+
       res.status(201).json({
         success: true,
         data: fullAppointment,
         message: "Appointment created successfully",
+        notifications: "Created for doctor and patient"
       })
     } catch (error) {
       // Rollback transaction on error
@@ -654,7 +674,10 @@ const AppointmentController = {
 
   // Update appointment
   async update(req, res) {
+    const client = await pool.connect()
     try {
+      await client.query('BEGIN')
+
       const appointmentId = req.params.id
       const { status, notes, checkInTime, checkOutTime, errorReason } = req.body
       const userId = req.user.id
@@ -682,10 +705,10 @@ const AppointmentController = {
         LEFT JOIN availability_slots s ON a.slot_id = s.id 
         WHERE a.id = $1
       `
-      const permissionResult = await req.dbTransaction.query(permissionQuery, [appointmentId])
+      const permissionResult = await client.query(permissionQuery, [appointmentId])
 
       if (permissionResult.rows.length === 0) {
-        await req.dbTransaction.rollback()
+        await client.query('ROLLBACK')
         return res.status(404).json({ 
           success: false, 
           error: "Appointment not found",
@@ -699,7 +722,7 @@ const AppointmentController = {
       if (userRole === "patient") {
         // Patients can only cancel or mark as no-show for their own appointments
         if (appointment.patient_id !== userId) {
-          await req.dbTransaction.rollback()
+          await client.query('ROLLBACK')
           return res.status(403).json({ 
             success: false, 
             error: "Access denied - you can only manage your own appointments",
@@ -708,7 +731,7 @@ const AppointmentController = {
         }
         
         if (status && !['cancelled', 'no-show'].includes(status)) {
-          await req.dbTransaction.rollback()
+          await client.query('ROLLBACK')
           return res.status(403).json({ 
             success: false, 
             error: "Patients can only cancel appointments or mark as no-show",
@@ -718,7 +741,7 @@ const AppointmentController = {
       }
 
       if (userRole === "doctor" && appointment.doctor_id !== userId) {
-        await req.dbTransaction.rollback()
+        await client.query('ROLLBACK')
         return res.status(403).json({ 
           success: false, 
           error: "Access denied - you can only manage your own appointments",
@@ -801,7 +824,7 @@ const AppointmentController = {
       }
 
       if (updates.length === 0) {
-        await req.dbTransaction.rollback()
+        await client.query('ROLLBACK')
         return res.status(400).json({ 
           success: false, 
           error: "No valid fields to update",
@@ -819,7 +842,8 @@ const AppointmentController = {
         RETURNING *
       `
 
-      const result = await req.dbTransaction.query(updateQuery, params)
+      const result = await client.query(updateQuery, params)
+      const updatedAppointment = result.rows[0]
 
       // Handle slot availability based on status
       if (appointment.slot_id) {
@@ -827,7 +851,7 @@ const AppointmentController = {
           // Make slot available again for these statuses
           console.log(`Marking slot ${appointment.slot_id} as available due to status: ${status}`)
           
-          const slotUpdateResult = await req.dbTransaction.query(
+          const slotUpdateResult = await client.query(
             "UPDATE availability_slots SET is_available = TRUE WHERE id = $1 RETURNING id, is_available",
             [appointment.slot_id],
           )
@@ -835,7 +859,7 @@ const AppointmentController = {
           console.log("Slot update result:", slotUpdateResult.rows[0])
         } else if (status === 'in-progress') {
           // Ensure slot is marked as unavailable when appointment starts
-          await req.dbTransaction.query(
+          await client.query(
             "UPDATE availability_slots SET is_available = FALSE WHERE id = $1",
             [appointment.slot_id],
           )
@@ -843,19 +867,33 @@ const AppointmentController = {
       }
 
       // Commit the transaction
-      await req.dbTransaction.commit()
+      await client.query('COMMIT')
 
       logger.info(`Appointment ${appointmentId} updated to status: ${status || 'unchanged'}`)
       res.status(200).json({ 
         success: true, 
-        data: result.rows[0],
+        data: updatedAppointment,
         message: `Appointment ${status ? `marked as ${status}` : 'updated'} successfully`
       })
+
+      // After successful update
+      await NotificationController.createNotification({
+        userId: updatedAppointment.doctor_id,
+        message: `Appointment updated for ${updatedAppointment.patient_name}`,
+        type: "appointment",
+        priority: "normal",
+        refId: updatedAppointment.id
+      })
+
+      await NotificationController.createNotification({
+        userId: updatedAppointment.patient_id,
+        message: `Your appointment with Dr. ${updatedAppointment.doctor_name} has been updated`,
+        type: "appointment",
+        priority: "normal",
+        refId: updatedAppointment.id
+      })
     } catch (error) {
-      // Rollback transaction on error
-      if (req.dbTransaction) {
-        await req.dbTransaction.rollback()
-      }
+      await client.query('ROLLBACK')
       logger.error(`Update appointment error: ${error.message}`)
       res.status(500).json({ 
         success: false, 
@@ -863,6 +901,8 @@ const AppointmentController = {
         details: error.message,
         code: "UPDATE_ERROR"
       })
+    } finally {
+      client.release()
     }
   },
 
@@ -1374,7 +1414,10 @@ const AppointmentController = {
 
   // Cancel appointment
   async cancel(req, res) {
+    const client = await pool.connect()
     try {
+      await client.query('BEGIN')
+
       const appointmentId = req.params.id
       const { reason = "Cancelled by user" } = req.body
       const userId = req.user.id
@@ -1387,10 +1430,10 @@ const AppointmentController = {
         LEFT JOIN availability_slots s ON a.slot_id = s.id 
         WHERE a.id = $1
       `
-      const appointmentResult = await req.dbTransaction.query(appointmentQuery, [appointmentId])
+      const appointmentResult = await client.query(appointmentQuery, [appointmentId])
 
       if (appointmentResult.rows.length === 0) {
-        await req.dbTransaction.rollback()
+        await client.query('ROLLBACK')
         return res.status(404).json({ error: "Appointment not found" })
       }
 
@@ -1398,21 +1441,21 @@ const AppointmentController = {
 
       // Check permissions
       if (userRole === "patient" && appointment.patient_id !== userId) {
-        await req.dbTransaction.rollback()
+        await client.query('ROLLBACK')
         return res.status(403).json({ error: "Access denied - you can only cancel your own appointments" })
       }
 
       if (userRole === "doctor" && appointment.doctor_id !== userId) {
-        await req.dbTransaction.rollback()
+        await client.query('ROLLBACK')
         return res.status(403).json({ error: "Access denied - you can only cancel your own appointments" })
       }
 
       // Update appointment status
-      await req.dbTransaction.query("UPDATE appointments SET status = $1 WHERE id = $2", ["cancelled", appointmentId])
+      await client.query("UPDATE appointments SET status = $1 WHERE id = $2", ["cancelled", appointmentId])
 
       // Make slot available again if it exists
       if (appointment.slot_id) {
-        await req.dbTransaction.query("UPDATE availability_slots SET is_available = TRUE WHERE id = $1", [appointment.slot_id])
+        await client.query("UPDATE availability_slots SET is_available = TRUE WHERE id = $1", [appointment.slot_id])
       }
 
       // Process refund if payment was made
@@ -1433,7 +1476,7 @@ const AppointmentController = {
       }
 
       // Commit the transaction
-      await req.dbTransaction.commit()
+      await client.query('COMMIT')
 
       res.status(200).json({ 
         success: true, 
@@ -1441,19 +1484,38 @@ const AppointmentController = {
         refundProcessed: refundResult?.refundProcessed || false,
         refundMessage: refundResult?.message
       })
+
+      // After successful cancellation
+      await NotificationController.createNotification({
+        userId: appointment.doctor_id,
+        message: `Appointment cancelled by ${appointment.patient_name}`,
+        type: "appointment",
+        priority: "high",
+        refId: appointment.id
+      })
+
+      await NotificationController.createNotification({
+        userId: appointment.patient_id,
+        message: `Your appointment with Dr. ${appointment.doctor_name} has been cancelled`,
+        type: "appointment",
+        priority: "normal",
+        refId: appointment.id
+      })
     } catch (error) {
-      // Rollback transaction on error
-      if (req.dbTransaction) {
-        await req.dbTransaction.rollback()
-      }
+      await client.query('ROLLBACK')
       logger.error(`Cancel appointment error: ${error.message}`)
       res.status(500).json({ success: false, error: "Server error", details: error.message })
+    } finally {
+      client.release()
     }
   },
 
   // Reschedule appointment
   async reschedule(req, res) {
+    const client = await pool.connect()
     try {
+      await client.query('BEGIN')
+
       const appointmentId = req.params.id
       const { newDate, reason } = req.body
       const userId = req.user.id
@@ -1465,10 +1527,10 @@ const AppointmentController = {
         LEFT JOIN availability_slots s ON a.slot_id = s.id 
         WHERE a.id = $1 AND (a.patient_id = $2 OR a.doctor_id = $2)
       `
-      const appointmentResult = await req.dbTransaction.query(appointmentQuery, [appointmentId, userId])
+      const appointmentResult = await client.query(appointmentQuery, [appointmentId, userId])
 
       if (appointmentResult.rows.length === 0) {
-        await req.dbTransaction.rollback()
+        await client.query('ROLLBACK')
         return res.status(404).json({ error: "Appointment not found or access denied" })
       }
 
@@ -1490,7 +1552,7 @@ const AppointmentController = {
   VALUES ($1, $2, $3, $4, $5, $6)
   RETURNING id
 `
-      const newSlotResult = await req.dbTransaction.query(createSlotQuery, [
+      const newSlotResult = await client.query(createSlotQuery, [
         appointment.doctor_id,
         "doctor",
         appointment.clinic_id,
@@ -1502,7 +1564,7 @@ const AppointmentController = {
       const newSlotId = newSlotResult.rows[0].id
 
       // Update appointment
-      await req.dbTransaction.query(
+      await client.query(
         "UPDATE appointments SET slot_id = $1, notes = $2, updated_at = NOW() WHERE id = $3",
         [newSlotId, reason, appointmentId],
       )
@@ -1513,7 +1575,7 @@ const AppointmentController = {
         console.log("Making old slot available due to reschedule:", appointment.slot_id)
         console.log("New slot created and marked unavailable:", newSlotId)
 
-        const rescheduleUpdateResult = await req.dbTransaction.query(
+        const rescheduleUpdateResult = await client.query(
           "UPDATE availability_slots SET is_available = TRUE WHERE id = $1 RETURNING id, is_available",
           [appointment.slot_id],
         )
@@ -1523,16 +1585,32 @@ const AppointmentController = {
       }
 
       // Commit the transaction
-      await req.dbTransaction.commit()
+      await client.query('COMMIT')
 
       res.status(200).json({ success: true, message: "Appointment rescheduled successfully" })
+
+      // After successful rescheduling
+      await NotificationController.createNotification({
+        userId: appointment.doctor_id,
+        message: `Appointment rescheduled for ${appointment.patient_name}`,
+        type: "appointment",
+        priority: "high",
+        refId: appointment.id
+      })
+
+      await NotificationController.createNotification({
+        userId: appointment.patient_id,
+        message: `Your appointment with Dr. ${appointment.doctor_name} has been rescheduled`,
+        type: "appointment",
+        priority: "normal",
+        refId: appointment.id
+      })
     } catch (error) {
-      // Rollback transaction on error
-      if (req.dbTransaction) {
-        await req.dbTransaction.rollback()
-      }
+      await client.query('ROLLBACK')
       logger.error(`Reschedule appointment error: ${error.message}`)
       res.status(500).json({ success: false, error: "Server error", details: error.message })
+    } finally {
+      client.release()
     }
   },
 
